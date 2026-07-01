@@ -1,5 +1,6 @@
 """Vendor master, 360 view, and the 6-step onboarding pipeline."""
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,8 +75,10 @@ async def vendor_360(vendor_id: str, db: AsyncSession = Depends(get_db),
 @router.get("/onboarding/list")
 async def list_onboarding(db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
     return await fetch_all(db, """
-        SELECT o.*, u.full_name AS initiated_by_name FROM vendor_onboarding o
+        SELECT o.*, u.full_name AS initiated_by_name, sb.full_name AS sent_by_name
+        FROM vendor_onboarding o
         LEFT JOIN users u ON u.id = o.initiated_by
+        LEFT JOIN users sb ON sb.id = o.sent_by
         ORDER BY o.created_at DESC
     """)
 
@@ -115,6 +118,154 @@ async def start_onboarding(body: OnboardingCreate, db: AsyncSession = Depends(ge
     await log_action(db, user["sub"], user["name"], "Initiated onboarding", "vendor_onboarding", onb_id,
                      f"{body.entity_name} · {body.vendor_type}")
     return {"id": onb_id, "stage": 1}
+
+
+class SendLinkBody(BaseModel):
+    entity_name: str
+    trade_name: str | None = None
+    vendor_type: str = "domestic"
+    constitution: str | None = "Private Limited"
+    category: str | None = None
+    contact_email: str
+    contact_phone: str | None = None
+    contact_name: str | None = None
+    link_validity_days: int = 7
+    email_subject: str = "Vendor Onboarding Invitation"
+    email_message: str | None = None
+
+
+@router.post("/onboarding/send-link")
+async def send_onboarding_link(body: SendLinkBody, db: AsyncSession = Depends(get_db),
+                               user: dict = Depends(get_current_user)):
+    from app.services import email_service
+    from app.core.config import get_settings
+
+    seq = await fetch_one(db, "SELECT COUNT(*) + 13 AS n FROM vendor_onboarding")
+    onb_id = f"ONB-{date.today():%Y}-{seq['n']:02d}"
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=body.link_validity_days)
+
+    import json
+    await execute(db, """
+        INSERT INTO vendor_onboarding (id, entity_name, trade_name, business_type, vendor_type,
+            constitution, category, contact_name, contact_email, contact_phone,
+            onb_token, link_expires_at, link_sent_at, sent_by, link_validity_days,
+            status, initiated_by, foreign_docs)
+        VALUES (:id, :en, :tn, 'pvt_ltd', :vt, :const, :cat, :cn, :ce, :cp,
+                :tok, :exp, now(), :u, :vdays, 'link_sent', :u, CAST(:fd AS jsonb))
+    """, {"id": onb_id, "en": body.entity_name, "tn": body.trade_name, "vt": body.vendor_type,
+          "const": body.constitution, "cat": body.category, "cn": body.contact_name,
+          "ce": body.contact_email, "cp": body.contact_phone, "tok": token,
+          "exp": expires_at, "u": user["sub"], "vdays": body.link_validity_days, "fd": json.dumps({})})
+
+    settings = get_settings()
+    kyc_url = f"{settings.frontend_url}/kyc/{token}"
+    msg = body.email_message or (
+        f"Dear Partner,\n\nGreetings! Please complete the vendor onboarding process by clicking "
+        f"the secure link below. The form takes around 8 minutes and you will need: GST certificate, "
+        f"PAN, bank details (cancelled cheque), and MSME certificate (if applicable).\n\n"
+        f"Warm regards,\n{user.get('name', 'Procurement Team')}"
+    )
+    await email_service.send_onboarding_email(
+        to_email=body.contact_email,
+        vendor_name=body.entity_name,
+        kyc_url=kyc_url,
+        subject=body.email_subject,
+        personal_message=msg,
+        sent_by_name=user.get("name", "Procurement Team"),
+        link_validity_days=body.link_validity_days,
+    )
+    await log_action(db, user["sub"], user["name"], "Sent onboarding link",
+                     "vendor_onboarding", onb_id, f"{body.entity_name} · {body.contact_email}")
+    return {"id": onb_id, "kyc_url": kyc_url, "expires_at": expires_at.isoformat()}
+
+
+@router.post("/onboarding/{onb_id}/resend-link")
+async def resend_onboarding_link(onb_id: str, db: AsyncSession = Depends(get_db),
+                                  user: dict = Depends(get_current_user)):
+    from app.services import email_service
+    from app.core.config import get_settings
+
+    onb = await fetch_one(db, "SELECT * FROM vendor_onboarding WHERE id = :id", {"id": onb_id})
+    if not onb:
+        raise HTTPException(404, "Onboarding record not found")
+    if not onb.get("onb_token") or not onb.get("contact_email"):
+        raise HTTPException(400, "No token or email on this record — use Send Link instead")
+
+    new_expiry = datetime.now(timezone.utc) + timedelta(days=int(onb.get("link_validity_days") or 7))
+    await execute(db, """
+        UPDATE vendor_onboarding SET link_expires_at = :exp, link_sent_at = now(),
+            status = 'link_sent', updated_at = now() WHERE id = :id
+    """, {"exp": new_expiry, "id": onb_id})
+
+    settings = get_settings()
+    kyc_url = f"{settings.frontend_url}/kyc/{onb['onb_token']}"
+    await email_service.send_onboarding_email(
+        to_email=onb["contact_email"],
+        vendor_name=onb["entity_name"],
+        kyc_url=kyc_url,
+        subject="Vendor Onboarding Invitation (Reminder)",
+        personal_message="Please complete your vendor onboarding by clicking the secure link below.",
+        sent_by_name=user.get("name", "Procurement Team"),
+        link_validity_days=int(onb.get("link_validity_days") or 7),
+    )
+    await log_action(db, user["sub"], user["name"], "Resent onboarding link",
+                     "vendor_onboarding", onb_id, onb["contact_email"])
+    return {"id": onb_id, "resent": True}
+
+
+# ---------- Public KYC endpoints (no auth — accessed by the vendor) ----------
+
+@router.get("/kyc/{token}")
+async def get_kyc_form(token: str, db: AsyncSession = Depends(get_db)):
+    onb = await fetch_one(db, "SELECT * FROM vendor_onboarding WHERE onb_token = :tok", {"tok": token})
+    if not onb:
+        raise HTTPException(404, "Invalid or expired link")
+    if onb.get("link_expires_at") and onb["link_expires_at"] < datetime.now(timezone.utc):
+        await execute(db, "UPDATE vendor_onboarding SET status = 'link_expired', updated_at = now() WHERE id = :id",
+                      {"id": onb["id"]})
+        raise HTTPException(410, "This onboarding link has expired. Please request a new one.")
+    if onb["status"] == "link_sent":
+        await execute(db, "UPDATE vendor_onboarding SET status = 'kyc_in_progress', updated_at = now() WHERE id = :id",
+                      {"id": onb["id"]})
+    return {
+        "id": onb["id"],
+        "entity_name": onb["entity_name"],
+        "trade_name": onb.get("trade_name"),
+        "vendor_type": onb["vendor_type"],
+        "constitution": onb.get("constitution"),
+        "contact_name": onb.get("contact_name"),
+        "contact_email": onb.get("contact_email"),
+        "contact_phone": onb.get("contact_phone"),
+    }
+
+
+class KycSubmitBody(BaseModel):
+    pan: str | None = None
+    gstin: str | None = None
+    contact_name: str | None = None
+    contact_phone: str | None = None
+    address: str | None = None
+    state: str | None = None
+
+
+@router.post("/kyc/{token}/submit")
+async def submit_kyc_form(token: str, body: KycSubmitBody, db: AsyncSession = Depends(get_db)):
+    onb = await fetch_one(db, "SELECT * FROM vendor_onboarding WHERE onb_token = :tok", {"tok": token})
+    if not onb:
+        raise HTTPException(404, "Invalid or expired link")
+    if onb["status"] in ("submitted_for_review", "approved"):
+        raise HTTPException(400, "KYC already submitted")
+    await execute(db, """
+        UPDATE vendor_onboarding SET
+            pan = COALESCE(:pan, pan), gstin = COALESCE(:gstin, gstin),
+            contact_name = COALESCE(:cn, contact_name), contact_phone = COALESCE(:cp, contact_phone),
+            address = COALESCE(:addr, address), state = COALESCE(:st, state),
+            status = 'submitted_for_review', updated_at = now()
+        WHERE id = :id
+    """, {"pan": body.pan, "gstin": body.gstin, "cn": body.contact_name,
+          "cp": body.contact_phone, "addr": body.address, "st": body.state, "id": onb["id"]})
+    return {"success": True, "message": "KYC submitted successfully. You will be contacted once reviewed."}
 
 
 class StepBody(BaseModel):

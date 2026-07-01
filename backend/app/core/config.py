@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret"
     allowed_origins: str = "http://localhost:5173"
     integration_mode_default: str = "simulated"
+    resend_api_key: str = ""
+    frontend_url: str = "http://localhost:5174"
 
     @property
     def cors_origins(self) -> list[str]:

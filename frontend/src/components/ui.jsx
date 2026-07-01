@@ -101,6 +101,8 @@ const CHIP_MAP = {
   mismatch_tax: "chip-red", not_in_2b: "chip-amber", offered: "chip-amber",
   released: "chip-green", reconciled: "chip-green", building: "chip-amber", file_generated: "chip-blue",
   in_progress: "chip-amber", won: "chip-green", bidding: "chip-amber", listed: "chip-blue",
+  link_sent: "chip-blue", kyc_in_progress: "chip-amber", submitted_for_review: "chip-purple",
+  link_expired: "chip-red", approved_activated: "chip-green", domestic: "chip-grey", foreign: "chip-orange",
   queued: "chip-amber", failed: "chip-red", success: "chip-green", pushed: "chip-green",
   ready: "chip-amber", signed: "chip-green", simulated: "chip-amber", live: "chip-green",
   auto_approved: "chip-green", skipped: "chip-grey", high: "chip-red", normal: "chip-grey",

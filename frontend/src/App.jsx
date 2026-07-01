@@ -9,12 +9,19 @@ import { Approvals, LiabilityJv, PaymentBatches, Advances } from "./screens/Appr
 import { VendorMaster, Onboarding } from "./screens/Vendors";
 import { DiscountDesk, Treds, Ebitda, EarlyPay } from "./screens/Discounting";
 import { Reports, ErpSync, AuditTrail, AdminConsole } from "./screens/Platform";
+import VendorKyc from "./screens/VendorKyc";
 
 export default function App() {
   const { user } = useApp();
-  if (!user) return <Login />;
   return (
     <Routes>
+      {/* Public vendor KYC form — no login required */}
+      <Route path="/kyc/:token" element={<VendorKyc />} />
+
+      {/* Auth-guarded app */}
+      {!user ? (
+        <Route path="*" element={<Login />} />
+      ) : (
       <Route element={<Layout />}>
         <Route path="/" element={<CommandCentre />} />
         <Route path="/requisitions" element={<Requisitions />} />
@@ -41,6 +48,7 @@ export default function App() {
         <Route path="/admin" element={<AdminConsole />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
+      )}
     </Routes>
   );
 }
