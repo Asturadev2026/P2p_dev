@@ -13,9 +13,15 @@ router = APIRouter(prefix="/vendors", tags=["vendors"])
 
 
 @router.get("")
-async def list_vendors(msme_only: bool = False, db: AsyncSession = Depends(get_db),
+async def list_vendors(msme_only: bool = False, include_inactive: bool = False,
+                       db: AsyncSession = Depends(get_db),
                        user: dict = Depends(get_current_user)):
-    return await fetch_all(db, """
+    # Default: active vendors only (used by pickers elsewhere). Vendor Master
+    # passes include_inactive=true so its Active/Inactive/Foreign tabs work.
+    where = "(NOT :msme OR v.is_msme)"
+    if not include_inactive:
+        where = "v.status = 'active' AND " + where
+    return await fetch_all(db, f"""
         SELECT v.*, c.name AS category_name, d.name AS department_name,
                (SELECT COUNT(*) FROM invoices i WHERE i.vendor_id = v.id AND i.stage NOT IN ('paid','rejected')) AS open_invoices,
                (SELECT COALESCE(SUM(i.total_amount), 0) FROM invoices i WHERE i.vendor_id = v.id) AS spend_ytd,
@@ -23,7 +29,7 @@ async def list_vendors(msme_only: bool = False, db: AsyncSession = Depends(get_d
         FROM vendors v
         LEFT JOIN spend_categories c ON c.id = v.category_id
         LEFT JOIN departments d ON d.id = v.department_id
-        WHERE v.status = 'active' AND (NOT :msme OR v.is_msme)
+        WHERE {where}
         ORDER BY spend_ytd DESC
     """, {"msme": msme_only})
 
