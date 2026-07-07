@@ -253,10 +253,12 @@ class KycSubmitBody(BaseModel):
     contact_phone: str | None = None
     address: str | None = None
     state: str | None = None
+    products_data: list = []
 
 
 @router.post("/kyc/{token}/submit")
 async def submit_kyc_form(token: str, body: KycSubmitBody, db: AsyncSession = Depends(get_db)):
+    import json
     onb = await fetch_one(db, "SELECT * FROM vendor_onboarding WHERE onb_token = :tok", {"tok": token})
     if not onb:
         raise HTTPException(404, "Invalid or expired link")
@@ -267,10 +269,12 @@ async def submit_kyc_form(token: str, body: KycSubmitBody, db: AsyncSession = De
             pan = COALESCE(:pan, pan), gstin = COALESCE(:gstin, gstin),
             contact_name = COALESCE(:cn, contact_name), contact_phone = COALESCE(:cp, contact_phone),
             address = COALESCE(:addr, address), state = COALESCE(:st, state),
+            products_data = CAST(:pd AS jsonb),
             status = 'submitted_for_review', updated_at = now()
         WHERE id = :id
     """, {"pan": body.pan, "gstin": body.gstin, "cn": body.contact_name,
-          "cp": body.contact_phone, "addr": body.address, "st": body.state, "id": onb["id"]})
+          "cp": body.contact_phone, "addr": body.address, "st": body.state,
+          "pd": json.dumps(body.products_data), "id": onb["id"]})
     return {"success": True, "message": "KYC submitted successfully. You will be contacted once reviewed."}
 
 

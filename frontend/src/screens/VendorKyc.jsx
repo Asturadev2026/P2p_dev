@@ -21,8 +21,9 @@ const DOMESTIC_STEPS = [
   { id:2, label:"GST Verification" },
   { id:3, label:"PAN & MSME" },
   { id:4, label:"Bank" },
-  { id:5, label:"Address" },
-  { id:6, label:"Agreement" },
+  { id:5, label:"Products" },
+  { id:6, label:"Address" },
+  { id:7, label:"Agreement" },
 ];
 
 const FOREIGN_STEPS = [
@@ -30,9 +31,10 @@ const FOREIGN_STEPS = [
   { id:2, label:"Identity" },
   { id:3, label:"Foreign Compliance" },
   { id:4, label:"Bank" },
-  { id:5, label:"Address" },
-  { id:6, label:"Tax & Products" },
-  { id:7, label:"Agreement" },
+  { id:5, label:"Products" },
+  { id:6, label:"Address" },
+  { id:7, label:"Tax & Products" },
+  { id:8, label:"Agreement" },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -75,6 +77,8 @@ export default function VendorKyc() {
     bank_method: "cancelled_cheque", acct_holder: "", acct_number: "", ifsc: "", bank_branch: "", acct_type: "savings", penny_done: false,
     // Step 5 – Address (shared)
     addresses: [{ type:"registered", line:"", city:"", state:"", pin:"" }],
+    // Step 5 – Products (shared)
+    products: [],
     // Last step – Agreement (shared)
     esigned: false, declaration: false,
   });
@@ -152,6 +156,7 @@ export default function VendorKyc() {
         },
         agreement: { esigned: form.esigned, declaration: form.declaration },
         products: form.product_categories,
+        products_data: form.products || [],
       };
       if (form.vendor_type === "foreign") {
         payload.foreign = {
@@ -185,15 +190,17 @@ export default function VendorKyc() {
       if (step === 2) return <StepGst    form={form} s={s} onVerify={verifyGstin} busy={verifying} />;
       if (step === 3) return <StepPanMsme form={form} s={s} setForm={setForm} onVerify={verifyPan} busy={verifying} />;
       if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} />;
-      if (step === 5) return <StepAddress form={form} setForm={setForm} />;
-      if (step === 6) return <StepAgreement form={form} s={s} />;
+      if (step === 5) return <StepProducts form={form} setForm={setForm} />;
+      if (step === 6) return <StepAddress form={form} setForm={setForm} />;
+      if (step === 7) return <StepAgreement form={form} s={s} />;
     } else {
       if (step === 2) return <StepForeignIdentity   form={form} s={s} />;
       if (step === 3) return <StepForeignCompliance form={form} s={s} setForm={setForm} />;
       if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} />;
-      if (step === 5) return <StepAddress form={form} setForm={setForm} />;
-      if (step === 6) return <StepTaxProducts form={form} s={s} />;
-      if (step === 7) return <StepAgreement form={form} s={s} />;
+      if (step === 5) return <StepProducts form={form} setForm={setForm} />;
+      if (step === 6) return <StepAddress form={form} setForm={setForm} />;
+      if (step === 7) return <StepTaxProducts form={form} s={s} />;
+      if (step === 8) return <StepAgreement form={form} s={s} />;
     }
     return null;
   };
@@ -593,6 +600,341 @@ function StepTaxProducts({ form, s }) {
         Withholding tax and GST under Reverse Charge Mechanism (RCM) will be calculated automatically on every invoice based on these settings. Vendor should not include Indian GST in their invoices.
       </div>
     </div>
+  );
+}
+
+// ─── Step 5: Products You Will Supply (shared) ───────────────────────────────
+const PROD_CATS = ["Stationery & Office Supplies","IT Hardware","Furniture","Electrical & Fixtures","Housekeeping & Consumables","Printing & Branding","Services"];
+const UOMS = ["Piece (Nos)","Box","Ream","Kilogram (Kg)","Litre","Metre","Set","Packet"];
+const GST_RATES = [0, 5, 12, 18, 28];
+
+const EMPTY_PROD = {
+  name:"", sku:"", category:"", sub_category:"", brand:"", uom:"",
+  description:"", colour:"", size:"", model:"", country_of_origin:"India", moq:"", warranty:"",
+  supply_type:"goods", hsn_sac:"", gst_rate:18, cess:"No", cess_rate:0,
+  price_type:"exclusive", basic_rate:"", discount:0,
+  payment_terms:"30 days credit", payment_mode:"NEFT / RTGS", lead_time:"", freight:"Included in price", warranty_period:"", rate_validity:"",
+};
+
+const INNER_STEPS = [
+  {id:1,label:"Product Details"},{id:2,label:"Particulars"},{id:3,label:"Tax & HSN"},
+  {id:4,label:"Pricing"},{id:5,label:"Payment Terms"},{id:6,label:"Review"},
+];
+
+function StepProducts({ form, setForm }) {
+  const initStep = (form.products || []).length > 0 ? 6 : 1;
+  const [pStep, setPStep] = useState(initStep);
+  const [prod, setProd]   = useState({ ...EMPTY_PROD });
+  const p = (k) => (v) => setProd((prev) => ({ ...prev, [k]: v?.target ? v.target.value : v }));
+  const products = form.products || [];
+
+  const addProduct = () => {
+    const updated = [...products, { ...prod, _id: products.length + 1 }];
+    setForm((f) => ({ ...f, products: updated }));
+    setProd({ ...EMPTY_PROD });
+    setPStep(6);
+  };
+
+  // Landed price calc
+  const basic   = parseFloat(prod.basic_rate) || 0;
+  const disc    = parseFloat(prod.discount)   || 0;
+  const taxable = prod.price_type === "exclusive"
+    ? basic - (basic * disc / 100)
+    : basic / (1 + prod.gst_rate / 100);
+  const gstAmt  = taxable * prod.gst_rate / 100;
+  const cessAmt = prod.cess === "Yes" ? taxable * (parseFloat(prod.cess_rate) || 0) / 100 : 0;
+  const landed  = taxable + gstAmt + cessAmt;
+
+  return (
+    <div style={CARD}>
+      <h2 style={{ margin:"0 0 4px", fontSize:20 }}>Add Products You Will Supply</h2>
+      <p style={{ color:"#666", fontSize:14, margin:"0 0 20px" }}>Your product catalog so procurement can match during RFQ & PO creation</p>
+
+      {/* Inner step tabs */}
+      <div style={{ display:"flex", borderBottom:"1px solid #eee", marginBottom:24, overflowX:"auto" }}>
+        {INNER_STEPS.map((st) => {
+          const done = st.id < pStep; const active = st.id === pStep;
+          return (
+            <div key={st.id} style={{ padding:"10px 16px 8px", borderBottom:`2px solid ${done ? GREEN : active ? RED : "transparent"}`, flexShrink:0 }}>
+              <div style={{ fontSize:10, color:done ? GREEN : active ? RED : "#aaa", fontWeight:700, letterSpacing:.5 }}>STEP {st.id}</div>
+              <div style={{ fontSize:12, fontWeight:done||active ? 600:400, color:done ? GREEN : active ? "#111":"#888", marginTop:2 }}>{st.label}{done ? " ✓":""}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {pStep === 1 && <ProdDetails prod={prod} p={p} />}
+      {pStep === 2 && <ProdParticulars prod={prod} p={p} />}
+      {pStep === 3 && <ProdTaxHsn prod={prod} p={p} setProd={setProd} />}
+      {pStep === 4 && <ProdPricing prod={prod} p={p} setProd={setProd} basic={basic} disc={disc} taxable={taxable} gstAmt={gstAmt} cessAmt={cessAmt} landed={landed} />}
+      {pStep === 5 && <ProdPaymentTerms prod={prod} p={p} onAdd={addProduct} />}
+      {pStep === 6 && <ProdReview products={products} setForm={setForm} onAddMore={() => { setProd({ ...EMPTY_PROD }); setPStep(1); }} />}
+
+      {/* Inner nav (hidden on review step since review has its own actions) */}
+      {pStep < 6 && (
+        <div style={{ display:"flex", justifyContent:"space-between", marginTop:20, paddingTop:16, borderTop:"1px solid #eee" }}>
+          <button onClick={() => setPStep((n) => n - 1)} disabled={pStep === 1}
+            style={{ background:"transparent", border:"1px solid #ddd", borderRadius:7, padding:"9px 18px", cursor:pStep===1?"not-allowed":"pointer", color:pStep===1?"#ccc":"#555", fontSize:13 }}>
+            ← Back
+          </button>
+          {pStep < 5 ? (
+            <button onClick={() => setPStep((n) => n + 1)}
+              style={{ background:NAVY, color:"#fff", border:"none", borderRadius:7, padding:"9px 20px", cursor:"pointer", fontSize:13, fontWeight:600 }}>
+              Save & Continue →
+            </button>
+          ) : (
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => setPStep(6)}
+                style={{ background:"transparent", border:`1px solid ${NAVY}`, color:NAVY, borderRadius:7, padding:"9px 18px", cursor:"pointer", fontSize:13, fontWeight:600 }}>
+                Review & Continue →
+              </button>
+              <button onClick={addProduct}
+                style={{ background:GREEN, color:"#fff", border:"none", borderRadius:7, padding:"9px 20px", cursor:"pointer", fontSize:13, fontWeight:700 }}>
+                + Add This Product
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Inner product sub-steps ────────────────────────────────────────────────────
+function ProdDetails({ prod, p }) {
+  return (
+    <>
+      <div style={ROW}>
+        <div style={{ flex:2 }}><label style={LABEL}>PRODUCT / ITEM NAME *</label><input style={INPUT} placeholder="e.g. A4 Copier Paper 75 GSM" value={prod.name} onChange={p("name")} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>PRODUCT CODE / SKU</label><input style={INPUT} placeholder="Your own item code (optional)" value={prod.sku} onChange={p("sku")} /></div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>CATEGORY *</label>
+          <select style={INPUT} value={prod.category} onChange={p("category")}>
+            <option value="">Select category</option>
+            {PROD_CATS.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ flex:1 }}><label style={LABEL}>SUB-CATEGORY</label><input style={INPUT} placeholder="e.g. Paper Products" value={prod.sub_category} onChange={p("sub_category")} /></div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>BRAND / MAKE</label><input style={INPUT} placeholder="e.g. JK Copier" value={prod.brand} onChange={p("brand")} /></div>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>UNIT OF MEASUREMENT (UOM) *</label>
+          <select style={INPUT} value={prod.uom} onChange={p("uom")}>
+            <option value="">Select unit</option>
+            {UOMS.map((u) => <option key={u}>{u}</option>)}
+          </select>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ProdParticulars({ prod, p }) {
+  return (
+    <>
+      <div style={FLD}><label style={LABEL}>PRODUCT DESCRIPTION *</label><textarea style={{ ...INPUT, height:80, resize:"vertical" }} placeholder="Describe the product — material, quality, packing, standard etc." value={prod.description} onChange={p("description")} /></div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>COLOUR / VARIANT</label><input style={INPUT} placeholder="e.g. White" value={prod.colour} onChange={p("colour")} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>SIZE / DIMENSION</label><input style={INPUT} placeholder="e.g. 210 × 297 mm" value={prod.size} onChange={p("size")} /></div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>MODEL / GRADE</label><input style={INPUT} placeholder="e.g. 75 GSM" value={prod.model} onChange={p("model")} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>COUNTRY OF ORIGIN *</label><input style={INPUT} placeholder="India" value={prod.country_of_origin} onChange={p("country_of_origin")} /></div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>MINIMUM ORDER QUANTITY (MOQ)</label><input style={INPUT} placeholder="e.g. 50" value={prod.moq} onChange={p("moq")} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>SHELF LIFE / WARRANTY (IF ANY)</label><input style={INPUT} placeholder="e.g. 1 year warranty" value={prod.warranty} onChange={p("warranty")} /></div>
+      </div>
+    </>
+  );
+}
+
+function ProdTaxHsn({ prod, p, setProd }) {
+  return (
+    <>
+      <div style={FLD}>
+        <label style={LABEL}>SUPPLY TYPE *</label>
+        <div style={{ display:"flex", gap:0, borderRadius:8, overflow:"hidden", border:`1px solid ${BORDER}` }}>
+          {[["goods","Goods (HSN)"],["service","Service (SAC)"]].map(([val,lbl]) => (
+            <button key={val} onClick={() => setProd((p) => ({ ...p, supply_type:val }))}
+              style={{ flex:1, padding:"11px 0", border:"none", background:prod.supply_type===val ? NAVY:"#fff", color:prod.supply_type===val ? "#fff":"#555", cursor:"pointer", fontSize:14, fontWeight:prod.supply_type===val ? 700:400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>HSN / SAC CODE *</label>
+          <input style={INPUT} placeholder="e.g. 4802 (paper)" value={prod.hsn_sac} onChange={p("hsn_sac")} />
+          <div style={{ color:"#888", fontSize:12, marginTop:4 }}>4-digit minimum · 6/8-digit preferred for turnover above ₹5 crore</div>
+        </div>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>GST RATE *</label>
+          <select style={INPUT} value={prod.gst_rate} onChange={(e) => setProd((prev) => ({ ...prev, gst_rate: Number(e.target.value) }))}>
+            {GST_RATES.map((r) => <option key={r} value={r}>{r}%</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>IS CESS APPLICABLE?</label>
+          <select style={INPUT} value={prod.cess} onChange={p("cess")}>
+            <option>No</option>
+            <option>Yes</option>
+          </select>
+        </div>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>CESS RATE (%)</label>
+          <input style={INPUT} placeholder="0" value={prod.cess_rate} onChange={p("cess_rate")} disabled={prod.cess === "No"} type="number" min={0} />
+        </div>
+      </div>
+      <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8, padding:"10px 14px", fontSize:13, color:"#1e40af" }}>
+        Tax type (CGST + SGST or IGST) will be decided automatically at billing based on your registered state versus the buyer's state.
+      </div>
+    </>
+  );
+}
+
+function ProdPricing({ prod, p, setProd, basic, disc, taxable, gstAmt, cessAmt, landed }) {
+  const fmt = (n) => `₹${Number(n).toFixed(2)}`;
+  return (
+    <>
+      <div style={FLD}>
+        <label style={LABEL}>QUOTED PRICE IS *</label>
+        <div style={{ display:"flex", gap:0, borderRadius:8, overflow:"hidden", border:`1px solid ${BORDER}` }}>
+          {[["exclusive","Exclusive of GST"],["inclusive","Inclusive of GST"]].map(([val,lbl]) => (
+            <button key={val} onClick={() => setProd((p) => ({ ...p, price_type:val }))}
+              style={{ flex:1, padding:"11px 0", border:"none", background:prod.price_type===val ? NAVY:"#fff", color:prod.price_type===val ? "#fff":"#555", cursor:"pointer", fontSize:14, fontWeight:prod.price_type===val ? 700:400 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>BASIC RATE PER UNIT (₹) *</label><input style={INPUT} placeholder="e.g. 280" value={prod.basic_rate} onChange={p("basic_rate")} type="number" min={0} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>DISCOUNT (%)</label><input style={INPUT} placeholder="0" value={prod.discount} onChange={p("discount")} type="number" min={0} max={100} /></div>
+      </div>
+      <div style={{ border:`1px solid ${BORDER}`, borderRadius:9, overflow:"hidden" }}>
+        <div style={{ background:"#f8f9fb", padding:"10px 16px", fontWeight:700, fontSize:13, borderBottom:`1px solid ${BORDER}` }}>LANDED PRICE WORKING (PER UNIT)</div>
+        {[
+          ["Basic Rate", fmt(basic), false],
+          ["Less: Discount", disc > 0 ? `- ${fmt(basic * disc / 100)}` : "- ₹0.00", false],
+          ["Taxable Value", fmt(taxable), false],
+          [`GST (${prod.gst_rate}%)`, fmt(gstAmt), false],
+          ["Cess", fmt(cessAmt), false],
+          ["Final Landed Price", fmt(landed), true],
+        ].map(([label, value, bold]) => (
+          <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"10px 16px", borderBottom:`1px solid ${BORDER}`, background:bold ? "#f0f9ff":"#fff" }}>
+            <span style={{ fontSize:13, fontWeight:bold ? 700:400 }}>{label}</span>
+            <span style={{ fontSize:13, fontWeight:bold ? 700:400, color:bold ? NAVY:"#333" }}>{value}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ProdPaymentTerms({ prod, p, onAdd }) {
+  return (
+    <>
+      <div style={ROW}>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>PAYMENT TERMS *</label>
+          <select style={INPUT} value={prod.payment_terms} onChange={p("payment_terms")}>
+            {["Advance","7 days credit","15 days credit","30 days credit","45 days credit","60 days credit","Against delivery"].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>PREFERRED MODE OF PAYMENT</label>
+          <select style={INPUT} value={prod.payment_mode} onChange={p("payment_mode")}>
+            {["NEFT / RTGS","Cheque","UPI","Letter of Credit"].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>DELIVERY LEAD TIME (DAYS) *</label><input style={INPUT} placeholder="e.g. 7" value={prod.lead_time} onChange={p("lead_time")} type="number" min={1} /></div>
+        <div style={{ flex:1 }}>
+          <label style={LABEL}>FREIGHT / TRANSPORT CHARGES</label>
+          <select style={INPUT} value={prod.freight} onChange={p("freight")}>
+            {["Included in price","Extra – as actuals","Extra – fixed rate","Free delivery"].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={ROW}>
+        <div style={{ flex:1 }}><label style={LABEL}>WARRANTY / GUARANTEE</label><input style={INPUT} placeholder="e.g. 12 months replacement warranty" value={prod.warranty_period} onChange={p("warranty_period")} /></div>
+        <div style={{ flex:1 }}><label style={LABEL}>RATE VALIDITY (UP TO)</label><input type="date" style={INPUT} value={prod.rate_validity} onChange={p("rate_validity")} /></div>
+      </div>
+      <div style={{ fontWeight:700, fontSize:13, marginBottom:10 }}>Supporting Documents</div>
+      <div style={ROW}>
+        <div style={{ flex:1, border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center" }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>📎 Upload <strong>Product Catalogue</strong></div>
+          <input type="file" accept=".pdf,.jpg,.png" style={{ fontSize:12 }} />
+          <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>PDF / JPG · max 5 MB</div>
+        </div>
+        <div style={{ flex:1, border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center" }}>
+          <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>🖼 Upload <strong>Product Image</strong></div>
+          <input type="file" accept=".jpg,.png" style={{ fontSize:12 }} />
+          <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>JPG / PNG · max 5 MB</div>
+        </div>
+      </div>
+      <div style={{ border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center", marginBottom:4 }}>
+        <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>📎 Upload <strong>Rate Contract / Quotation</strong> (optional)</div>
+        <input type="file" accept=".pdf" style={{ fontSize:12 }} />
+        <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>PDF · max 10 MB</div>
+      </div>
+    </>
+  );
+}
+
+function ProdReview({ products, setForm, onAddMore }) {
+  const removeProduct = (id) => {
+    const updated = products.filter((p) => p._id !== id);
+    setForm((f) => ({ ...f, products: updated }));
+  };
+  return (
+    <>
+      <div style={{ border:`1px solid ${BORDER}`, borderRadius:9, overflow:"hidden", marginBottom:18 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ background:"#f8f9fb" }}>
+              {["Product","HSN","UOM","Basic ₹","GST","Landed ₹",""].map((h) => (
+                <th key={h} style={{ padding:"10px 14px", fontSize:12, fontWeight:700, color:"#555", textAlign:h==="Basic ₹"||h==="Landed ₹" ? "right":"left", borderBottom:`1px solid ${BORDER}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {products.length === 0 ? (
+              <tr><td colSpan={7} style={{ textAlign:"center", padding:"20px", color:"#aaa", fontSize:13 }}>No products added yet. Go to Step 5 and tap "Add This Product".</td></tr>
+            ) : products.map((pr) => (
+              <tr key={pr._id} style={{ borderBottom:`1px solid ${BORDER}` }}>
+                <td style={{ padding:"10px 14px", fontSize:13 }}><div style={{ fontWeight:600 }}>{pr.name}</div><div style={{ color:"#888", fontSize:11 }}>{pr.category}</div></td>
+                <td style={{ padding:"10px 14px", fontSize:13 }}>{pr.hsn_sac || "—"}</td>
+                <td style={{ padding:"10px 14px", fontSize:13 }}>{pr.uom || "—"}</td>
+                <td style={{ padding:"10px 14px", fontSize:13, textAlign:"right" }}>₹{parseFloat(pr.basic_rate || 0).toFixed(2)}</td>
+                <td style={{ padding:"10px 14px", fontSize:13 }}>{pr.gst_rate}%</td>
+                <td style={{ padding:"10px 14px", fontSize:13, textAlign:"right", fontWeight:600 }}>
+                  {(() => { const b=parseFloat(pr.basic_rate)||0; const t=b-(b*(parseFloat(pr.discount)||0)/100); return `₹${(t+t*pr.gst_rate/100).toFixed(2)}`; })()}
+                </td>
+                <td style={{ padding:"10px 14px" }}><button onClick={() => removeProduct(pr._id)} style={{ background:"transparent", border:"none", color:RED, cursor:"pointer", fontSize:16, lineHeight:1 }}>×</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {products.length > 0 && (
+        <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8, padding:"10px 14px", fontSize:13, color:"#166534", marginBottom:16 }}>
+          ✓ {products.length} product{products.length > 1 ? "s" : ""} added. Click <strong>Continue →</strong> below to proceed, or add more products.
+        </div>
+      )}
+      <button onClick={onAddMore}
+        style={{ background:NAVY, color:"#fff", border:"none", borderRadius:8, padding:"11px 22px", cursor:"pointer", fontSize:14, fontWeight:600 }}>
+        + Add More Products
+      </button>
+    </>
   );
 }
 

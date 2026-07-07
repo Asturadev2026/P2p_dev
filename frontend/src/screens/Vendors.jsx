@@ -308,7 +308,16 @@ function SendLinkView({ onCancel, onSent }) {
                 </div>
                 <div className="field">
                   <label>EXPECTED CATEGORY</label>
-                  <input placeholder="e.g. IT Services" value={form.category} onChange={f("category")} />
+                  <select value={form.category} onChange={f("category")}>
+                    <option value="">Select category</option>
+                    <option>IT &amp; Hardware</option>
+                    <option>Office Supplies</option>
+                    <option>Travel &amp; Hospitality</option>
+                    <option>Marketing</option>
+                    <option>Legal &amp; Compliance</option>
+                    <option>Facility &amp; Admin</option>
+                    <option>HR &amp; Training</option>
+                  </select>
                 </div>
               </div>
               <div className="form-row">
