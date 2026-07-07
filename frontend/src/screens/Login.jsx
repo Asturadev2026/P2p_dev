@@ -1,18 +1,19 @@
 import { useState } from "react";
 import { useApp } from "../context/AppContext";
 
-const DEMO_USERS = [
-  ["amardeep", "Compliance Reviewer"], ["vikram", "Procurement"],
-  ["pradip", "Checker · AP Manager"], ["nidhi", "Maker · AP Executive"],
-  ["meera", "Financial Controller"], ["anish", "CFO"],
-  ["rahul", "Requester · Branch"], ["tanvi", "Treasury Desk"],
-  ["kavita", "Auditor"], ["admin", "Administrator"],
+// role label -> username (username is used only to authenticate, never shown)
+const ROLES = [
+  ["Compliance Reviewer", "amardeep"], ["Procurement", "vikram"],
+  ["Checker · AP Manager", "pradip"], ["Maker · AP Executive", "nidhi"],
+  ["Financial Controller", "meera"], ["CFO", "anish"],
+  ["Requester · Branch", "rahul"], ["Treasury Desk", "tanvi"],
+  ["Auditor", "kavita"], ["Administrator", "admin"],
 ];
 
 export default function Login() {
   const { login, toast } = useApp();
-  const [username, setUsername] = useState("pradip");
-  const [password, setPassword] = useState("intelezen123");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
@@ -27,9 +28,9 @@ export default function Login() {
     }
   };
 
-  // One-click login for fast access (all demo users share the same password)
-  const quickLogin = async (u) => {
-    setUsername(u); setPassword("intelezen123"); setBusy(true);
+  // Sign in by role (username resolved internally, not displayed)
+  const loginAs = async (u) => {
+    setBusy(true);
     try {
       await login(u, "intelezen123");
     } catch (err) {
@@ -53,25 +54,24 @@ export default function Login() {
         <form onSubmit={submit}>
           <div className="field">
             <label>Username</label>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+            <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
           </div>
           <div className="field">
             <label>Password</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </div>
           <button className="btn btn-pri" style={{ width: "100%", justifyContent: "center" }} disabled={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
         <div style={{ marginTop: 18, fontSize: 11, color: "var(--ink-500)" }}>
-          <b>Quick login</b> — click a role to sign in instantly (password <span className="mono">intelezen123</span>):
+          <b>Sign in by role</b> — click to enter:
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
-            {DEMO_USERS.map(([u, r]) => (
-              <button key={u} type="button" onClick={() => quickLogin(u)} disabled={busy}
+            {ROLES.map(([role, u]) => (
+              <button key={u} type="button" onClick={() => loginAs(u)} disabled={busy}
                 style={{ textAlign: "left", background: "#fff", border: "1px solid #e0ddd3", borderRadius: 7,
-                  padding: "7px 10px", cursor: busy ? "not-allowed" : "pointer", fontSize: 11, lineHeight: 1.3 }}>
-                <div style={{ fontWeight: 700, color: "#16233d" }}>{r}</div>
-                <div className="mono" style={{ color: "#9098a5" }}>{u}</div>
+                  padding: "8px 11px", cursor: busy ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 700, color: "#16233d" }}>
+                {role}
               </button>
             ))}
           </div>
