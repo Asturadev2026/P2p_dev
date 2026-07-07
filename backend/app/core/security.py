@@ -58,3 +58,24 @@ def require_roles(*roles: str):
             raise HTTPException(status_code=403, detail=f"Requires role: {', '.join(roles)}")
         return user
     return checker
+
+
+def require_exact_roles(*roles: str):
+    """Like require_roles but WITHOUT the implicit admin bypass. Used for vendor
+    compliance decisions — the business rule states admin must not approve/reject
+    financial or compliance actions, only the Compliance Reviewer may."""
+    async def checker(user: dict = Depends(get_current_user)) -> dict:
+        if roles and user.get("role") not in roles:
+            raise HTTPException(status_code=403, detail=f"Requires role: {', '.join(roles)}")
+        return user
+    return checker
+
+
+def deny_roles(*blocked: str):
+    """Allow any authenticated user EXCEPT the listed roles. Used for vendor read
+    access — the business rule states Requesters have no vendor access at all."""
+    async def checker(user: dict = Depends(get_current_user)) -> dict:
+        if user.get("role") in blocked:
+            raise HTTPException(status_code=403, detail="Your role has no vendor access")
+        return user
+    return checker

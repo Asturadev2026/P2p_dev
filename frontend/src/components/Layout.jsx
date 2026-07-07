@@ -22,8 +22,9 @@ const NAV = [
     { to: "/advances", label: "Advances & Imprest" },
   ]},
   { section: "Vendor 360", items: [
-    { to: "/vendors", label: "Vendor Master" },
-    { to: "/onboarding", label: "Onboarding" },
+    { to: "/vendors", label: "Vendor Master", hideFor: ["requester"] },
+    { to: "/onboarding", label: "Onboarding", hideFor: ["requester"] },
+    { to: "/compliance", label: "Compliance Approvals", roles: ["compliance"], pill: "KYC", pillClass: "pill-purple" },
   ]},
   { section: "Invoice Discounting", items: [
     { to: "/discount-desk", label: "Discount Desk" },
@@ -55,6 +56,7 @@ const TITLES = {
   "/advances": ["AP Automation", "Advances & Imprest", "Auto-adjustment · bill-based reconciliation"],
   "/vendors": ["Vendor 360", "Vendor Master", "Single source of truth · live verification status"],
   "/onboarding": ["Vendor 360", "Vendor Onboarding", "KYC · GST · PAN · Udyam · penny drop · ERP push"],
+  "/compliance": ["Vendor 360", "Compliance Approvals", "Pending vendor KYC review · approve / reject / suspend"],
   "/discount-desk": ["Invoice Discounting", "Discount Desk", "Treasury · Bank CC · TReDS pools · MTD gain tracker"],
   "/treds": ["Invoice Discounting", "TReDS Marketplace", "RXIL · M1xchange · Invoicemart · financier auctions"],
   "/ebitda": ["Invoice Discounting", "EBITDA Gain Calculator", "Side-by-side pool comparison · engine recommendation"],
@@ -68,7 +70,8 @@ const TITLES = {
 export default function Layout() {
   const { user, logout } = useApp();
   const loc = useLocation();
-  const meta = TITLES[loc.pathname] || TITLES["/"];
+  const meta = TITLES[loc.pathname]
+    || (loc.pathname.startsWith("/vendors/") ? ["Vendor 360", "Vendor Detail", "Profile · KYC · bank · DTAA · audit · timeline"] : TITLES["/"]);
   const initials = (user?.name || "?").split(" ").map((w) => w[0]).slice(0, 2).join("");
 
   return (
@@ -85,7 +88,10 @@ export default function Layout() {
           {NAV.map((s) => (
             <div className="nav-section" key={s.section}>
               <div className="nav-section-title">{s.section}</div>
-              {s.items.map((it) => (
+              {s.items
+                .filter((it) => !it.roles || it.roles.includes(user?.role) || user?.role === "admin")
+                .filter((it) => !it.hideFor || !it.hideFor.includes(user?.role))
+                .map((it) => (
                 <NavLink key={it.to} to={it.to} end={it.to === "/"}
                   className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}>
                   <span>{it.label}</span>

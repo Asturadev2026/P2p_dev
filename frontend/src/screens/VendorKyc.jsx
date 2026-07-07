@@ -70,7 +70,7 @@ export default function VendorKyc() {
     // Step 2 – Foreign: Identity
     country: "", foreign_legal_name: "", foreign_tax_id: "", date_of_incorporation: "",
     // Step 3 – Foreign: Compliance
-    trc_uploaded: false, form10f_uploaded: false, no_pe_signed: false,
+    trc_uploaded: false, form10f_uploaded: false, no_pe_signed: false, dtaa_valid_till: "",
     // Step 6 – Foreign: Tax & Products
     dtaa_rate: "", tds_section: "Section 195 – Other sums", product_categories: "",
     // Step 4 – Bank (shared)
@@ -96,7 +96,7 @@ export default function VendorKyc() {
       setInfo({ entity_name: "Preview Company Ltd", trade_name: "", vendor_type: "domestic", contact_email: "vendor@example.com", contact_name: "Demo Vendor" });
       return;
     }
-    apiFetch(`/vendors/kyc/${token}`)
+    apiFetch(`/public/onboard/${token}`)
       .then((d) => {
         setInfo(d);
         setForm((p) => ({
@@ -141,10 +141,34 @@ export default function VendorKyc() {
     if (!form.declaration) { setBanner({ type:"err", msg:"Please accept the declaration to proceed" }); return; }
     setSubmitting(true); setBanner(null);
     try {
-      await apiFetch(`/vendors/kyc/${token}/submit`, {
-        method:"POST",
-        body:JSON.stringify({ pan:form.pan, gstin:form.gstin, contact_name:info?.contact_name, contact_phone:info?.contact_phone, address:form.addresses[0]?.line, state:form.addresses[0]?.state, products_data:form.products || [] }),
-      });
+      // Full KYC payload — persisted server-side to vendor_onboarding.kyc_payload,
+      // then verified (GST/PAN/MSME/Bank/DTAA) and routed to pending_compliance.
+      const payload = {
+        legal_name: form.entity_name, trade_name: form.trade_name,
+        pan: form.pan, gstin: form.gstin,
+        state: form.addresses[0]?.state,
+        addresses: form.addresses,
+        contacts: [{ is_primary: true, name: info?.contact_name, email: info?.contact_email, phone: info?.contact_phone }],
+        sub_vendors: [],   // not collected in this wizard yet — TODO
+        bank: {
+          account_no: form.acct_number, ifsc: form.ifsc, account_name: form.acct_holder,
+          bank_branch: form.bank_branch, acct_type: form.acct_type, method: form.bank_method,
+        },
+        agreement: { esigned: form.esigned, declaration: form.declaration },
+        products: form.product_categories,
+        products_data: form.products || [],
+      };
+      if (form.vendor_type === "foreign") {
+        payload.foreign = {
+          country: form.country, foreign_legal_name: form.foreign_legal_name,
+          foreign_tax_id: form.foreign_tax_id,
+          trc_ref: form.trc_uploaded ? "TRC-UPLOADED" : "",
+          form_10f_ref: form.form10f_uploaded ? "FORM10F-UPLOADED" : "",
+          no_pe: form.no_pe_signed, dtaa_rate: form.dtaa_rate,
+          tds_section: form.tds_section, dtaa_valid_till: form.dtaa_valid_till || null,
+        };
+      }
+      await apiFetch(`/public/onboard/${token}/submit`, { method: "POST", body: JSON.stringify(payload) });
       setSubmitted(true);
     } catch(e) { setBanner({ type:"err", msg:e.message }); }
     finally { setSubmitting(false); }
@@ -530,6 +554,12 @@ function StepForeignCompliance({ form, s, setForm }) {
       <DocRow label="Tax Residency Certificate (TRC) · yearly *" sub="Issued by tax authority of country of residence · valid for the year" uploadedKey="trc_uploaded" uploadedLabel="Uploaded" />
       <DocRow label="Form 10F · yearly *" sub="Self-declaration with tax-related info not in TRC · must be e-filed on Income Tax portal" uploadedKey="form10f_uploaded" uploadedLabel="Uploaded" />
       <DocRow label="No PE Declaration *" sub="Self-declaration that vendor has no Permanent Establishment in India" uploadedKey="no_pe_signed" uploadedLabel="Signed" />
+
+      <div style={{ marginBottom:14 }}>
+        <label style={LABEL}>TRC / FORM 10F VALID TILL *</label>
+        <input style={INPUT} type="date" value={form.dtaa_valid_till} onChange={s("dtaa_valid_till")} />
+        <div style={{ color:"#888", fontSize:12, marginTop:4 }}>Activation is blocked if this date is missing or in the past.</div>
+      </div>
 
       <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, padding:"12px 14px", fontSize:13, color:"#92400e", lineHeight:1.6 }}>
         <strong>Reminder:</strong> TRC and Form 10F must be renewed every financial year. We will send automated reminders 30 days before expiry. Failure to renew leads to higher TDS deduction without DTAA benefit.

@@ -7,6 +7,8 @@ import { Requisitions, Rfqs, PurchaseOrders, Grns } from "./screens/Procurement"
 import { CaptureInbox, MatchQueue, Gst2b, TdsEngine } from "./screens/ApInvoices";
 import { Approvals, LiabilityJv, PaymentBatches, Advances } from "./screens/ApprovalsPayments";
 import { VendorMaster, Onboarding } from "./screens/Vendors";
+import VendorDetail from "./screens/VendorDetail";
+import ComplianceDashboard from "./screens/Compliance";
 import { DiscountDesk, Treds, Ebitda, EarlyPay } from "./screens/Discounting";
 import { Reports, ErpSync, AuditTrail, AdminConsole } from "./screens/Platform";
 import VendorKyc from "./screens/VendorKyc";
@@ -16,6 +18,7 @@ export default function App() {
   return (
     <Routes>
       {/* Public vendor KYC form — no login required */}
+      <Route path="/onboard/:token" element={<VendorKyc />} />
       <Route path="/kyc/:token" element={<VendorKyc />} />
 
       {/* Auth-guarded app */}
@@ -37,7 +40,9 @@ export default function App() {
         <Route path="/payments" element={<PaymentBatches />} />
         <Route path="/advances" element={<Advances />} />
         <Route path="/vendors" element={<VendorMaster />} />
+        <Route path="/vendors/:id" element={<VendorDetail />} />
         <Route path="/onboarding" element={<Onboarding />} />
+        <Route path="/compliance" element={<ComplianceDashboard />} />
         <Route path="/discount-desk" element={<DiscountDesk />} />
         <Route path="/treds" element={<Treds />} />
         <Route path="/ebitda" element={<Ebitda />} />
