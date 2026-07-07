@@ -12,6 +12,18 @@ from app.utils.audit import log_action
 router = APIRouter(prefix="/procurement", tags=["procurement"])
 
 
+async def _require_active_vendor(db: AsyncSession, vendor_id: str):
+    """Business rule: only ACTIVE vendors may be used in RFQ award / PO. A vendor that
+    is pending_compliance, rejected, suspended, etc. must be blocked server-side —
+    never rely on the UI hiding it."""
+    v = await fetch_one(db, "SELECT id, name, status FROM vendors WHERE id = :id", {"id": vendor_id})
+    if not v:
+        raise HTTPException(404, f"Vendor {vendor_id} not found")
+    if v["status"] != "active":
+        raise HTTPException(409, f"Vendor {v['name']} is '{v['status']}' — only ACTIVE vendors can be used.")
+    return v
+
+
 # ---------- RFQ ----------
 
 @router.get("/rfqs")
@@ -51,6 +63,7 @@ async def award_rfq(rfq_id: str, body: AwardBody, db: AsyncSession = Depends(get
     quotes = await fetch_all(db, "SELECT * FROM quotations WHERE rfq_id = :id ORDER BY amount", {"id": rfq_id})
     if not quotes:
         raise HTTPException(400, "No quotations to award")
+    await _require_active_vendor(db, body.vendor_id)
     lowest = quotes[0]["vendor_id"]
     if body.vendor_id != lowest and not body.override_reason:
         raise HTTPException(400, "Awarding a non-lowest quote requires an override reason (controlled override)")
@@ -116,6 +129,7 @@ class POCreate(BaseModel):
 @router.post("/pos")
 async def create_po(body: POCreate, db: AsyncSession = Depends(get_db),
                     user: dict = Depends(get_current_user)):
+    await _require_active_vendor(db, body.vendor_id)
     seq = await fetch_one(db, "SELECT COUNT(*) + 1 AS n FROM purchase_orders WHERE id LIKE :p",
                           {"p": f"PO/{date.today():%Y/%m}/%"})
     po_id = f"PO/{date.today():%Y/%m}/{seq['n']:05d}"

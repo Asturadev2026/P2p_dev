@@ -8,11 +8,13 @@ import SummaryModal from "../components/SummaryModal";
 
 /* ============ Vendor Master + 360 ============ */
 const VM_TABS = [
-  { key: "all",      label: "All Vendors",     fn: () => true },
-  { key: "active",   label: "Active",          fn: (v) => v.status === "active" },
-  { key: "msme",     label: "MSME Registered", fn: (v) => v.is_msme },
-  { key: "foreign",  label: "Foreign Vendors", fn: (v) => v.vendor_type === "foreign" },
-  { key: "inactive", label: "Inactive",        fn: (v) => v.status !== "active" },
+  { key: "all",                label: "All",                fn: () => true },
+  { key: "active",             label: "Active",             fn: (v) => v.status === "active" },
+  { key: "pending_compliance", label: "Pending Compliance", fn: (v) => v.status === "pending_compliance" },
+  { key: "rejected",           label: "Rejected",           fn: (v) => v.status === "rejected" },
+  { key: "suspended",          label: "Suspended",          fn: (v) => v.status === "suspended" },
+  { key: "foreign",            label: "Foreign",            fn: (v) => v.vendor_type === "foreign" },
+  { key: "msme",               label: "MSME",               fn: (v) => v.is_msme },
 ];
 
 const vmInitials = (name = "") => {
@@ -39,6 +41,14 @@ function VmKpi({ label, value, note, valueColor, noteColor }) {
   );
 }
 
+const VM_STATUS_STYLE = {
+  active:             { bg: "#e7f4ec", color: "#1a7f4b", label: "Active" },
+  pending_compliance: { bg: "#e8f0fe", color: "#2563eb", label: "Pending Compliance" },
+  rejected:           { bg: "#fde8e8", color: "#c0392b", label: "Rejected" },
+  suspended:          { bg: "#fdecd7", color: "#b8600b", label: "Suspended" },
+  draft:              { bg: "#f0eee8", color: "#8a8f98", label: "Draft" },
+};
+
 function VmStatus({ status }) {
   if (status === "active")
     return (
@@ -46,8 +56,8 @@ function VmStatus({ status }) {
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#1a7f4b" }} />Active
       </span>
     );
-  const label = status ? status[0].toUpperCase() + status.slice(1) : "—";
-  return <span style={{ background: "#fdf3d7", color: "#a6791f", fontWeight: 600, fontSize: 12, padding: "3px 12px", borderRadius: 20 }}>{label}</span>;
+  const st = VM_STATUS_STYLE[status] || { bg: "#f0eee8", color: "#8a8f98", label: status || "—" };
+  return <span style={{ background: st.bg, color: st.color, fontWeight: 600, fontSize: 12, padding: "3px 12px", borderRadius: 20 }}>{st.label}</span>;
 }
 
 function VmMsme({ v }) {
@@ -58,36 +68,31 @@ function VmMsme({ v }) {
 
 export function VendorMaster() {
   const navigate = useNavigate();
+  const { user } = useApp();
+  const canOnboard = ["procurement", "admin"].includes(user?.role);
   const { data, loading } = useFetch(() => api.get("/vendors", { include_inactive: true }), []);
-  const { data: onb } = useFetch(() => api.get("/vendors/onboarding/list"), []);
   const [tab, setTab] = useState("all");
   const [q, setQ] = useState("");
   const [stateF, setStateF] = useState("");
+  const [statusF, setStatusF] = useState("");
+  const [typeF, setTypeF] = useState("");
   const [msmeF, setMsmeF] = useState("");
-  const [v360, setV360] = useState(null);
 
-  const open = async (v) => setV360(await api.get(`/vendors/${v.id}/v360`));
   if (loading) return <Loading />;
 
   const vendors = data || [];
   const states = [...new Set(vendors.map((v) => v.state).filter(Boolean))].sort();
-  const pendingOnb = (onb || []).filter((o) => o.status !== "approved").length;
-
-  const activeV = vendors.filter((v) => v.status === "active");
-  const totalSpend = activeV.reduce((s, v) => s + Number(v.spend_ytd || 0), 0);
-  const msmeV = activeV.filter((v) => v.is_msme);
-  const msmeSpend = msmeV.reduce((s, v) => s + Number(v.spend_ytd || 0), 0);
-  const rated = vendors.filter((v) => v.rating != null);
-  const avgRating = rated.length ? rated.reduce((s, v) => s + Number(v.rating), 0) / rated.length : 0;
-
   const count = (key) => vendors.filter(VM_TABS.find((t) => t.key === key).fn).length;
 
   const rows = vendors
     .filter(VM_TABS.find((t) => t.key === tab).fn)
     .filter((v) => !stateF || v.state === stateF)
+    .filter((v) => !statusF || v.status === statusF)
+    .filter((v) => !typeF || v.vendor_type === typeF)
     .filter((v) => !msmeF || (msmeF === "Non-MSME" ? !v.is_msme : vmMsmeLabel(v) === msmeF))
     .filter((v) => {
       const s = q.trim().toLowerCase();
+      // Search: Vendor / GST / PAN (+ Email once a vendor email column exists — TODO)
       return !s || [v.name, v.gstin, v.pan].some((x) => (x || "").toLowerCase().includes(s));
     });
 
@@ -112,7 +117,9 @@ export function VendorMaster() {
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={exportCsv} style={VM_OUTLINE}>Export CSV</button>
-          <button onClick={() => navigate("/onboarding")} style={VM_DARK}>+ Onboard New Vendor</button>
+          {canOnboard && (
+            <button onClick={() => navigate("/onboarding")} style={VM_DARK}>+ Onboard New Vendor</button>
+          )}
         </div>
       </div>
 
@@ -130,11 +137,11 @@ export function VendorMaster() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 18, marginBottom: 20 }}>
-        <VmKpi label="TOTAL SPEND YTD" value={inr(totalSpend)} note="▲ 12.4% vs last year" noteColor="#1a7f4b" />
-        <VmKpi label="MSME SPEND" value={inr(msmeSpend)} note={`${msmeV.length} registered units`} />
-        <VmKpi label="AVG RATING" value={`${avgRating.toFixed(1)} / 5`} note="delivery + quality + cost" />
-        <VmKpi label="PENDING ONBOARDING" value={pendingOnb} valueColor="#b8860b"
-          note={<span onClick={() => navigate("/onboarding")} style={{ color: "#c0392b", cursor: "pointer" }}>View all →</span>} />
+        <VmKpi label="TOTAL VENDORS" value={vendors.length} note="all statuses" />
+        <VmKpi label="MSME VENDORS" value={vendors.filter((v) => v.is_msme).length} note="Udyam-registered" />
+        <VmKpi label="FOREIGN VENDORS" value={vendors.filter((v) => v.vendor_type === "foreign").length} note="cross-border · DTAA" />
+        <VmKpi label="PENDING COMPLIANCE" value={vendors.filter((v) => v.status === "pending_compliance").length}
+          valueColor="#b8860b" note="awaiting compliance review" />
       </div>
 
       <div style={{ background: "#fbfbf8", border: "1px solid #edeae1", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", gap: 12 }}>
@@ -150,6 +157,17 @@ export function VendorMaster() {
         <select value={msmeF} onChange={(e) => setMsmeF(e.target.value)} style={VM_SELECT}>
           <option value="">All MSME Status</option>
           {["Micro", "Small", "Medium", "Non-MSME"].map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select value={statusF} onChange={(e) => setStatusF(e.target.value)} style={VM_SELECT}>
+          <option value="">All Status</option>
+          {["active", "pending_compliance", "rejected", "suspended", "draft"].map((s) => (
+            <option key={s} value={s}>{(VM_STATUS_STYLE[s] || {}).label || s}</option>
+          ))}
+        </select>
+        <select value={typeF} onChange={(e) => setTypeF(e.target.value)} style={VM_SELECT}>
+          <option value="">All Types</option>
+          <option value="domestic">Domestic</option>
+          <option value="foreign">Foreign</option>
         </select>
       </div>
 
@@ -184,7 +202,7 @@ export function VendorMaster() {
                 <td style={{ padding: "14px 18px" }}><VmMsme v={v} /></td>
                 <td style={{ padding: "14px 18px" }}><VmStatus status={v.status} /></td>
                 <td style={{ padding: "14px 18px", textAlign: "right" }}>
-                  <button onClick={() => open(v)} style={VM_VIEW}>View →</button>
+                  <button onClick={() => navigate(`/vendors/${v.id}`)} style={VM_VIEW}>View →</button>
                 </td>
               </tr>
             ))}
@@ -194,40 +212,6 @@ export function VendorMaster() {
           </tbody>
         </table>
       </div>
-      {v360 && (
-        <Modal wide title={`${v360.id} · ${v360.name}`} onClose={() => setV360(null)}>
-          <DetailGrid items={[
-            ["GSTIN", v360.gstin], ["PAN", v360.pan], ["State", v360.state],
-            ["MSME", v360.is_msme ? `${v360.udyam_no || "Yes"}` : "No"],
-            ["Bank", `${v360.bank_name} · ${v360.bank_account}`], ["TDS", v360.tds_section || "—"],
-            ["Terms", `Net ${v360.payment_terms_days}`], ["Rating", v360.rating],
-            ["Spend YTD", inr(v360.totals.spend_ytd)], ["Invoices", v360.totals.invoice_count],
-            ["Open dues", inr(v360.totals.open_dues)],
-            ["Discount earnings", `${inrFull(v360.discount_earnings.total)} · ${v360.discount_earnings.deals} deals`],
-          ]} />
-          <h4 style={{ margin: "14px 0 8px" }}>Six-month ledger (compliance review view)</h4>
-          <DataTable columns={[
-            { key: "id", label: "Invoice", render: (r) => <span className="mono">{r.id}</span> },
-            { key: "invoice_date", label: "Date", render: (r) => dt(r.invoice_date) },
-            { key: "total_amount", label: "Gross", num: true, render: (r) => inrFull(r.total_amount) },
-            { key: "tds_amount", label: "TDS", num: true, render: (r) => inrFull(r.tds_amount) },
-            { key: "net_payable", label: "Net", num: true, render: (r) => inrFull(r.net_payable) },
-            { key: "stage", label: "Stage", render: (r) => <Chip value={r.stage} /> },
-            { key: "utr", label: "UTR", render: (r) => <span className="mono">{r.utr || "—"}</span> },
-          ]} rows={v360.six_month_ledger} />
-          {v360.discounting_history.length > 0 && (<>
-            <h4 style={{ margin: "14px 0 8px" }}>Discounting history</h4>
-            <DataTable columns={[
-              { key: "id", label: "Deal", render: (r) => <span className="mono">{r.id}</span> },
-              { key: "pool_name", label: "Pool" },
-              { key: "advance_amount", label: "Advance", num: true, render: (r) => inrFull(r.advance_amount) },
-              { key: "days_saved", label: "Days", num: true },
-              { key: "vendor_rate_pct", label: "Rate", num: true, render: (r) => pct(r.vendor_rate_pct) },
-              { key: "ebitda_gain", label: "Gain", num: true, render: (r) => inrFull(r.ebitda_gain) },
-              { key: "status", label: "Status", render: (r) => <Chip value={r.status} /> },
-            ]} rows={v360.discounting_history} /></>)}
-        </Modal>
-      )}
     </>
   );
 }
@@ -441,7 +425,8 @@ function SendLinkView({ onCancel, onSent }) {
 }
 
 export function Onboarding() {
-  const { toast } = useApp();
+  const { toast, user } = useApp();
+  const canManage = ["procurement", "admin"].includes(user?.role);
   const { data, loading, refresh } = useFetch(() => api.get("/vendors/onboarding/list"), []);
   const [active, setActive] = useState(null);
   const [showSendLink, setShowSendLink] = useState(false);
@@ -474,6 +459,7 @@ export function Onboarding() {
   const rows = (data || []).filter(TAB_DEFS.find((t) => t.key === tab)?.fn || (() => true));
 
   const actionBtn = (r) => {
+    if (!canManage) return null;
     if (r.status === "link_sent" || r.status === "link_expired")
       return <button className="btn btn-gho btn-sm" onClick={(e) => resend(r, e)}>Resend</button>;
     if (r.status === "submitted_for_review")
@@ -490,7 +476,9 @@ export function Onboarding() {
         actions={
           <>
             <button className="btn btn-gho" onClick={() => window.open("/kyc/preview", "_blank")}>Preview KYC Form</button>
-            <button className="btn btn-pri" onClick={() => setShowSendLink(true)}>✉ Send Onboarding Link</button>
+            {canManage && (
+              <button className="btn btn-pri" onClick={() => setShowSendLink(true)}>✉ Send Onboarding Link</button>
+            )}
           </>
         } />
 

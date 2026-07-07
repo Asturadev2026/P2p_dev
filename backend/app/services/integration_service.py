@@ -88,6 +88,31 @@ async def penny_drop(db: AsyncSession, account_no: str, ifsc: str, expected_name
                        {"account_no": account_no, "ifsc": ifsc, "expected_name": expected_name}, sim)
 
 
+async def verify_dtaa(db: AsyncSession, country: str, trc_ref: str, form_10f_ref: str,
+                      no_pe: bool, valid_till: str | None) -> dict:
+    """Foreign-vendor DTAA document check. Returns status verified|pending|failed and a
+    reference id. valid_till is an ISO date string; an expired or missing date fails."""
+    def sim(p):
+        from datetime import date as _date
+        has_docs = bool(p["trc_ref"]) and bool(p["form_10f_ref"]) and bool(p["no_pe"])
+        expired = False
+        if p.get("valid_till"):
+            try:
+                expired = _date.fromisoformat(p["valid_till"][:10]) < _date.today()
+            except ValueError:
+                expired = True
+        else:
+            expired = True  # missing validity == not valid
+        ok = has_docs and not expired
+        return {"country": p["country"], "valid": ok,
+                "status": "verified" if ok else ("failed" if not has_docs else "expired"),
+                "trc_ref": p["trc_ref"], "form_10f_ref": p["form_10f_ref"],
+                "no_pe": p["no_pe"], "valid_till": p.get("valid_till"), "expired": expired}
+    return await _call(db, "dtaa", "dtaa_validate", country,
+                       {"country": country, "trc_ref": trc_ref, "form_10f_ref": form_10f_ref,
+                        "no_pe": no_pe, "valid_till": valid_till}, sim)
+
+
 async def validate_irn(db: AsyncSession, irn: str, invoice_ref: str) -> dict:
     def sim(p):
         return {"irn": p["irn"], "status": "ACT", "valid": bool(p["irn"]),
