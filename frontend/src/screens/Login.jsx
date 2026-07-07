@@ -2,10 +2,11 @@ import { useState } from "react";
 import { useApp } from "../context/AppContext";
 
 const DEMO_USERS = [
+  ["amardeep", "Compliance Reviewer"], ["vikram", "Procurement"],
   ["pradip", "Checker · AP Manager"], ["nidhi", "Maker · AP Executive"],
-  ["meera", "Financial Controller"], ["anish", "CFO"], ["vikram", "Procurement"],
-  ["rahul", "Requester · Branch"], ["tanvi", "Treasury Desk"], ["admin", "Administrator"],
-  ["kavita", "Auditor"],
+  ["meera", "Financial Controller"], ["anish", "CFO"],
+  ["rahul", "Requester · Branch"], ["tanvi", "Treasury Desk"],
+  ["kavita", "Auditor"], ["admin", "Administrator"],
 ];
 
 export default function Login() {
@@ -19,6 +20,18 @@ export default function Login() {
     setBusy(true);
     try {
       await login(username, password);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // One-click login for fast access (all demo users share the same password)
+  const quickLogin = async (u) => {
+    setUsername(u); setPassword("intelezen123"); setBusy(true);
+    try {
+      await login(u, "intelezen123");
     } catch (err) {
       toast(err.message, true);
     } finally {
@@ -51,10 +64,15 @@ export default function Login() {
           </button>
         </form>
         <div style={{ marginTop: 18, fontSize: 11, color: "var(--ink-500)" }}>
-          <b>Demo logins</b> (password <span className="mono">intelezen123</span>):
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, marginTop: 6 }}>
+          <b>Quick login</b> — click a role to sign in instantly (password <span className="mono">intelezen123</span>):
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
             {DEMO_USERS.map(([u, r]) => (
-              <a key={u} onClick={() => setUsername(u)}>{u} · {r}</a>
+              <button key={u} type="button" onClick={() => quickLogin(u)} disabled={busy}
+                style={{ textAlign: "left", background: "#fff", border: "1px solid #e0ddd3", borderRadius: 7,
+                  padding: "7px 10px", cursor: busy ? "not-allowed" : "pointer", fontSize: 11, lineHeight: 1.3 }}>
+                <div style={{ fontWeight: 700, color: "#16233d" }}>{r}</div>
+                <div className="mono" style={{ color: "#9098a5" }}>{u}</div>
+              </button>
             ))}
           </div>
         </div>
