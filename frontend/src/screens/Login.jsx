@@ -71,7 +71,6 @@ export default function Login() {
                 style={{ textAlign: "left", background: "#fff", border: "1px solid #e0ddd3", borderRadius: 7,
                   padding: "7px 10px", cursor: busy ? "not-allowed" : "pointer", fontSize: 11, lineHeight: 1.3 }}>
                 <div style={{ fontWeight: 700, color: "#16233d" }}>{r}</div>
-                <div className="mono" style={{ color: "#9098a5" }}>{u}</div>
               </button>
             ))}
           </div>
