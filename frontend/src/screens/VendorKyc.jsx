@@ -47,6 +47,65 @@ async function apiFetch(path, opts = {}) {
   return json;
 }
 
+// ─── File Upload Field ────────────────────────────────────────────────────────
+// Uploads immediately on file select → POST /vendors/kyc/{token}/upload (multipart)
+// In preview mode: skips API call, shows filename locally
+function FileUploadField({ token, docType, label, accept = ".pdf,.jpg,.jpeg,.png", isPreview }) {
+  const [status,   setStatus]   = useState("idle"); // idle | uploading | done | error
+  const [fileInfo, setFileInfo] = useState(null);
+  const uid = `fu-${docType}`;
+
+  const upload = async (file) => {
+    if (!file) return;
+    if (isPreview) {
+      setStatus("done");
+      setFileInfo({ filename: file.name, size: file.size });
+      return;
+    }
+    setStatus("uploading");
+    const fd = new FormData();
+    fd.append("doc_type", docType);
+    fd.append("file", file);
+    try {
+      const res = await fetch(`${BASE}/vendors/kyc/${token}/upload`, { method: "POST", body: fd });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.detail || "Upload failed");
+      setStatus("done");
+      setFileInfo(json);
+    } catch (e) {
+      setStatus("error");
+      setFileInfo({ error: e.message });
+    }
+  };
+
+  const borderColor = status === "done" ? GREEN : status === "error" ? "#dc2626" : BORDER;
+  const bg          = status === "done" ? "#f0fdf4" : status === "error" ? "#fef2f2" : "#fafafa";
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {label && <label style={LABEL}>{label}</label>}
+      <label htmlFor={uid} style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "11px 14px",
+        border: `1px dashed ${borderColor}`, borderRadius: 7, background: bg,
+        cursor: "pointer", transition: "border-color .15s",
+      }}>
+        <input id={uid} type="file" accept={accept} style={{ display: "none" }}
+          onChange={(e) => upload(e.target.files[0])} />
+        {status === "uploading" && <span style={{ color: "#888", fontSize: 13 }}>Uploading…</span>}
+        {status === "done"      && <span style={{ color: GREEN, fontSize: 13 }}>
+          ✓ {fileInfo?.filename}
+          <span style={{ color: "#888", marginLeft: 8 }}>
+            ({fileInfo?.size ? `${(fileInfo.size / 1024).toFixed(0)} KB` : "uploaded"})
+          </span>
+          <span style={{ marginLeft: 8, color: "#888" }}>· click to replace</span>
+        </span>}
+        {status === "error"     && <span style={{ color: "#dc2626", fontSize: 13 }}>⚠ {fileInfo?.error} — click to retry</span>}
+        {status === "idle"      && <span style={{ color: "#666", fontSize: 13 }}>📎 Click to upload · PDF / JPG / PNG · max 10 MB</span>}
+      </label>
+    </div>
+  );
+}
+
 // ─── Root component ───────────────────────────────────────────────────────────
 export default function VendorKyc() {
   const { token } = useParams();
@@ -159,24 +218,25 @@ export default function VendorKyc() {
   if (submitted) return <Centered><SuccessCard email={info.contact_email} /></Centered>;
 
   // ── Step render (domestic vs foreign branching) ───────────────────────────
+  const up = { token, isPreview }; // shorthand for file-upload props
   const renderStep = () => {
     if (step === 1) return <Step1 form={form} s={s} />;
 
     if (form.vendor_type === "domestic") {
       if (step === 2) return <StepGst    form={form} s={s} onVerify={verifyGstin} busy={verifying} />;
-      if (step === 3) return <StepPanMsme form={form} s={s} setForm={setForm} onVerify={verifyPan} busy={verifying} />;
-      if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} />;
-      if (step === 5) return <StepProducts form={form} setForm={setForm} />;
+      if (step === 3) return <StepPanMsme form={form} s={s} setForm={setForm} onVerify={verifyPan} busy={verifying} {...up} />;
+      if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} {...up} />;
+      if (step === 5) return <StepProducts form={form} setForm={setForm} {...up} />;
       if (step === 6) return <StepAddress form={form} setForm={setForm} />;
-      if (step === 7) return <StepAgreement form={form} s={s} />;
+      if (step === 7) return <StepAgreement form={form} s={s} {...up} />;
     } else {
-      if (step === 2) return <StepForeignIdentity   form={form} s={s} />;
-      if (step === 3) return <StepForeignCompliance form={form} s={s} setForm={setForm} />;
-      if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} />;
-      if (step === 5) return <StepProducts form={form} setForm={setForm} />;
+      if (step === 2) return <StepForeignIdentity   form={form} s={s} {...up} />;
+      if (step === 3) return <StepForeignCompliance form={form} s={s} setForm={setForm} {...up} />;
+      if (step === 4) return <StepBank   form={form} s={s} setForm={setForm} onPenny={runPennyDrop} busy={verifying} {...up} />;
+      if (step === 5) return <StepProducts form={form} setForm={setForm} {...up} />;
       if (step === 6) return <StepAddress form={form} setForm={setForm} />;
       if (step === 7) return <StepTaxProducts form={form} s={s} />;
-      if (step === 8) return <StepAgreement form={form} s={s} />;
+      if (step === 8) return <StepAgreement form={form} s={s} {...up} />;
     }
     return null;
   };
@@ -392,7 +452,7 @@ function StepGst({ form, s, onVerify, busy }) {
 }
 
 // ─── Step 3 (Domestic): PAN & MSME ───────────────────────────────────────────
-function StepPanMsme({ form, s, setForm, onVerify, busy }) {
+function StepPanMsme({ form, s, setForm, onVerify, busy, token, isPreview }) {
   return (
     <div style={CARD}>
       <h2 style={{ margin:"0 0 4px", fontSize:20 }}>PAN & MSME Status</h2>
@@ -445,8 +505,7 @@ function StepPanMsme({ form, s, setForm, onVerify, busy }) {
       )}
       {form.msme_status==="upload" && (
         <div style={FLD}>
-          <label style={LABEL}>UPLOAD MSME / UDYAM CERTIFICATE</label>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ ...INPUT, padding:"7px 10px", cursor:"pointer" }} />
+          <FileUploadField token={token} isPreview={isPreview} docType="msme_cert" label="UPLOAD MSME / UDYAM CERTIFICATE *" />
         </div>
       )}
 
@@ -460,7 +519,7 @@ function StepPanMsme({ form, s, setForm, onVerify, busy }) {
 // ─── Step 2 (Foreign): Foreign Vendor Identity ────────────────────────────────
 const COUNTRIES = ["United States","United Kingdom","Singapore","UAE","Germany","Japan","Australia","Netherlands","Switzerland","Canada","Other"];
 
-function StepForeignIdentity({ form, s }) {
+function StepForeignIdentity({ form, s, token, isPreview }) {
   return (
     <div style={CARD}>
       <h2 style={{ margin:"0 0 4px", fontSize:20 }}>Foreign Vendor Identity</h2>
@@ -492,8 +551,7 @@ function StepForeignIdentity({ form, s }) {
       </div>
 
       <div style={FLD}>
-        <label style={LABEL}>UPLOAD CERTIFICATE OF INCORPORATION (PDF) *</label>
-        <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ ...INPUT, padding:"7px 10px", cursor:"pointer" }} />
+        <FileUploadField token={token} isPreview={isPreview} docType="incorp_cert" label="UPLOAD CERTIFICATE OF INCORPORATION (PDF) *" />
       </div>
 
       <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8, padding:"12px 14px", fontSize:13, color:"#1e40af", lineHeight:1.6 }}>
@@ -504,8 +562,8 @@ function StepForeignIdentity({ form, s }) {
 }
 
 // ─── Step 3 (Foreign): Foreign Compliance / DTAA ─────────────────────────────
-function StepForeignCompliance({ form, s, setForm }) {
-  const DocRow = ({ label, sub, uploadedKey, uploadedLabel }) => (
+function StepForeignCompliance({ form, s, setForm, token, isPreview }) {
+  const DocRow = ({ label, sub, uploadedKey, uploadedLabel, docType }) => (
     <div style={{ border:`1px solid ${BORDER}`, borderRadius:9, padding:18, marginBottom:14 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
         <div>
@@ -518,7 +576,7 @@ function StepForeignCompliance({ form, s, setForm }) {
           {uploadedLabel}
         </label>
       </div>
-      <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ ...INPUT, padding:"7px 10px", cursor:"pointer" }} />
+      <FileUploadField token={token} isPreview={isPreview} docType={docType} />
     </div>
   );
 
@@ -527,9 +585,9 @@ function StepForeignCompliance({ form, s, setForm }) {
       <h2 style={{ margin:"0 0 4px", fontSize:20 }}>DTAA Documents</h2>
       <p style={{ color:"#2563eb", fontSize:14, margin:"0 0 20px" }}>Double Taxation Avoidance Agreement compliance · all fields mandatory</p>
 
-      <DocRow label="Tax Residency Certificate (TRC) · yearly *" sub="Issued by tax authority of country of residence · valid for the year" uploadedKey="trc_uploaded" uploadedLabel="Uploaded" />
-      <DocRow label="Form 10F · yearly *" sub="Self-declaration with tax-related info not in TRC · must be e-filed on Income Tax portal" uploadedKey="form10f_uploaded" uploadedLabel="Uploaded" />
-      <DocRow label="No PE Declaration *" sub="Self-declaration that vendor has no Permanent Establishment in India" uploadedKey="no_pe_signed" uploadedLabel="Signed" />
+      <DocRow label="Tax Residency Certificate (TRC) · yearly *" sub="Issued by tax authority of country of residence · valid for the year" uploadedKey="trc_uploaded" uploadedLabel="Uploaded" docType="trc" />
+      <DocRow label="Form 10F · yearly *" sub="Self-declaration with tax-related info not in TRC · must be e-filed on Income Tax portal" uploadedKey="form10f_uploaded" uploadedLabel="Uploaded" docType="form_10f" />
+      <DocRow label="No PE Declaration *" sub="Self-declaration that vendor has no Permanent Establishment in India" uploadedKey="no_pe_signed" uploadedLabel="Signed" docType="no_pe_declaration" />
 
       <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, padding:"12px 14px", fontSize:13, color:"#92400e", lineHeight:1.6 }}>
         <strong>Reminder:</strong> TRC and Form 10F must be renewed every financial year. We will send automated reminders 30 days before expiry. Failure to renew leads to higher TDS deduction without DTAA benefit.
@@ -591,7 +649,7 @@ const INNER_STEPS = [
   {id:4,label:"Pricing"},{id:5,label:"Payment Terms"},{id:6,label:"Review"},
 ];
 
-function StepProducts({ form, setForm }) {
+function StepProducts({ form, setForm, token, isPreview }) {
   const initStep = (form.products || []).length > 0 ? 6 : 1;
   const [pStep, setPStep] = useState(initStep);
   const [prod, setProd]   = useState({ ...EMPTY_PROD });
@@ -637,7 +695,7 @@ function StepProducts({ form, setForm }) {
       {pStep === 2 && <ProdParticulars prod={prod} p={p} />}
       {pStep === 3 && <ProdTaxHsn prod={prod} p={p} setProd={setProd} />}
       {pStep === 4 && <ProdPricing prod={prod} p={p} setProd={setProd} basic={basic} disc={disc} taxable={taxable} gstAmt={gstAmt} cessAmt={cessAmt} landed={landed} />}
-      {pStep === 5 && <ProdPaymentTerms prod={prod} p={p} onAdd={addProduct} />}
+      {pStep === 5 && <ProdPaymentTerms prod={prod} p={p} onAdd={addProduct} token={token} isPreview={isPreview} />}
       {pStep === 6 && <ProdReview products={products} setForm={setForm} onAddMore={() => { setProd({ ...EMPTY_PROD }); setPStep(1); }} />}
 
       {/* Inner nav (hidden on review step since review has its own actions) */}
@@ -808,7 +866,7 @@ function ProdPricing({ prod, p, setProd, basic, disc, taxable, gstAmt, cessAmt, 
   );
 }
 
-function ProdPaymentTerms({ prod, p, onAdd }) {
+function ProdPaymentTerms({ prod, p, onAdd, token, isPreview }) {
   return (
     <>
       <div style={ROW}>
@@ -840,22 +898,14 @@ function ProdPaymentTerms({ prod, p, onAdd }) {
       </div>
       <div style={{ fontWeight:700, fontSize:13, marginBottom:10 }}>Supporting Documents</div>
       <div style={ROW}>
-        <div style={{ flex:1, border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center" }}>
-          <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>📎 Upload <strong>Product Catalogue</strong></div>
-          <input type="file" accept=".pdf,.jpg,.png" style={{ fontSize:12 }} />
-          <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>PDF / JPG · max 5 MB</div>
+        <div style={{ flex:1 }}>
+          <FileUploadField token={token} isPreview={isPreview} docType="product_catalogue" label="PRODUCT CATALOGUE" accept=".pdf,.jpg,.png" />
         </div>
-        <div style={{ flex:1, border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center" }}>
-          <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>🖼 Upload <strong>Product Image</strong></div>
-          <input type="file" accept=".jpg,.png" style={{ fontSize:12 }} />
-          <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>JPG / PNG · max 5 MB</div>
+        <div style={{ flex:1 }}>
+          <FileUploadField token={token} isPreview={isPreview} docType="product_image" label="PRODUCT IMAGE" accept=".jpg,.jpeg,.png" />
         </div>
       </div>
-      <div style={{ border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, textAlign:"center", marginBottom:4 }}>
-        <div style={{ fontSize:12, color:"#888", marginBottom:6 }}>📎 Upload <strong>Rate Contract / Quotation</strong> (optional)</div>
-        <input type="file" accept=".pdf" style={{ fontSize:12 }} />
-        <div style={{ fontSize:11, color:"#aaa", marginTop:4 }}>PDF · max 10 MB</div>
-      </div>
+      <FileUploadField token={token} isPreview={isPreview} docType="rate_contract" label="RATE CONTRACT / QUOTATION (optional)" accept=".pdf" />
     </>
   );
 }
@@ -909,7 +959,7 @@ function ProdReview({ products, setForm, onAddMore }) {
 }
 
 // ─── Step 4: Bank Account (shared) ───────────────────────────────────────────
-function StepBank({ form, s, setForm, onPenny, busy }) {
+function StepBank({ form, s, setForm, onPenny, busy, token, isPreview }) {
   const ACCT_TYPES = ["Current","Savings","Cash Credit","Overdraft"];
   return (
     <div style={CARD}>
@@ -926,8 +976,10 @@ function StepBank({ form, s, setForm, onPenny, busy }) {
           </select>
         </div>
         <div style={{ flex:1 }}>
-          <label style={LABEL}>UPLOAD {form.bank_method==="cancelled_cheque" ? "CANCELLED CHEQUE" : form.bank_method==="bank_statement" ? "BANK STATEMENT" : "PASSBOOK"} *</label>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ ...INPUT, padding:"7px 10px", cursor:"pointer" }} />
+          <FileUploadField
+            token={token} isPreview={isPreview} docType="bank_proof"
+            label={`UPLOAD ${form.bank_method==="cancelled_cheque" ? "CANCELLED CHEQUE" : form.bank_method==="bank_statement" ? "BANK STATEMENT" : "PASSBOOK"} *`}
+          />
         </div>
       </div>
       <div style={ROW}>
@@ -1019,7 +1071,7 @@ function StepAddress({ form, setForm }) {
 }
 
 // ─── Last step: Agreement & Declaration (shared) ──────────────────────────────
-function StepAgreement({ form, s }) {
+function StepAgreement({ form, s, token, isPreview }) {
   return (
     <div style={CARD}>
       <h2 style={{ margin:"0 0 4px", fontSize:20 }}>Agreement & Declaration</h2>
@@ -1045,7 +1097,7 @@ function StepAgreement({ form, s }) {
             <span style={{ fontSize:20 }}>📤</span>
             <div><div style={{ fontWeight:700, fontSize:14 }}>Upload Signed Copy</div><div style={{ color:"#888", fontSize:12 }}>If e-sign not available</div></div>
           </div>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ ...INPUT, padding:"7px 10px", cursor:"pointer" }} />
+          <FileUploadField token={token} isPreview={isPreview} docType="agreement_signed" />
         </div>
       </div>
 

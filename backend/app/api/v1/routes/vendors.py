@@ -1,13 +1,16 @@
 """Vendor master, 360 view, and the 6-step onboarding pipeline."""
 from datetime import date, datetime, timedelta, timezone
 import secrets
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
 from app.core.security import get_current_user
 from app.services import integration_service
 from app.utils.audit import log_action
+
+MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 router = APIRouter(prefix="/vendors", tags=["vendors"])
 
@@ -215,6 +218,50 @@ async def resend_onboarding_link(onb_id: str, db: AsyncSession = Depends(get_db)
 
 
 # ---------- Public KYC endpoints (no auth — accessed by the vendor) ----------
+
+# NOTE: /kyc/documents/{doc_id} must be declared BEFORE /kyc/{token}
+# so FastAPI doesn't swallow "documents" as a token value.
+@router.get("/kyc/documents/{doc_id}")
+async def get_kyc_document(doc_id: str, db: AsyncSession = Depends(get_db),
+                            _: dict = Depends(get_current_user)):
+    """Staff-only: stream a document stored in kyc_documents."""
+    doc = await fetch_one(db, "SELECT * FROM kyc_documents WHERE id = :id", {"id": doc_id})
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    return Response(
+        content=bytes(doc["file_data"]),
+        media_type=doc["mime_type"] or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{doc["filename"]}"'},
+    )
+
+
+@router.post("/kyc/{token}/upload")
+async def upload_kyc_document(
+    token: str,
+    doc_type: str = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Public: vendor uploads a KYC document. Returns doc_id + metadata (no file bytes)."""
+    onb = await fetch_one(db, "SELECT id FROM vendor_onboarding WHERE onb_token = :tok", {"tok": token})
+    if not onb:
+        raise HTTPException(404, "Invalid or expired link")
+
+    contents = await file.read()
+    if len(contents) > MAX_FILE_BYTES:
+        raise HTTPException(413, "File too large — maximum 10 MB")
+
+    doc_id = f"DOC-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
+    await execute(db, """
+        INSERT INTO kyc_documents (id, onb_id, doc_type, filename, mime_type, file_size, file_data)
+        VALUES (:id, :onb_id, :dt, :fn, :mt, :fs, :fd)
+    """, {
+        "id": doc_id, "onb_id": onb["id"], "dt": doc_type,
+        "fn": file.filename, "mt": file.content_type,
+        "fs": len(contents), "fd": contents,
+    })
+    return {"doc_id": doc_id, "filename": file.filename, "size": len(contents), "doc_type": doc_type}
+
 
 @router.get("/kyc/{token}")
 async def get_kyc_form(token: str, db: AsyncSession = Depends(get_db)):
