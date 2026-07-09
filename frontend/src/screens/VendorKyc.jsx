@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import { PROCUREMENT_CATEGORIES } from "../constants/procurementCategories";
 
 const BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8002") + "/api/v1";
 
@@ -662,7 +663,7 @@ function StepTaxProducts({ form, s }) {
 }
 
 // ─── Step 5: Products You Will Supply (shared) ───────────────────────────────
-const PROD_CATS = ["Stationery & Office Supplies","IT Hardware","Furniture","Electrical & Fixtures","Housekeeping & Consumables","Printing & Branding","Services"];
+const PROD_CATS = PROCUREMENT_CATEGORIES;
 const UOMS = ["Piece (Nos)","Box","Ream","Kilogram (Kg)","Litre","Metre","Set","Packet"];
 const GST_RATES = [0, 5, 12, 18, 28];
 

@@ -1,13 +1,17 @@
+import json
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
-from app.core.security import get_current_user
-from app.services import approval_engine
+from app.core.security import get_current_user, require_roles
 from app.utils.audit import log_action
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
+
+# Roles that can act as PR approver in this demo (Compliance/Checker/FC/CFO).
+# Procurement only works on already-approved PRs (RFQ/PO/GRN); it does not approve them.
+APPROVER_ROLES = ("checker", "fc", "cfo", "compliance")
 
 
 class ReqLine(BaseModel):
@@ -29,10 +33,22 @@ class ReqCreate(BaseModel):
     lines: list[ReqLine]
 
 
+async def _resolve_pending_approvals(db: AsyncSession, req_id: str, decision: str, user: dict, comments: str = ""):
+    """Demo approval: resolve any open generic-approval-engine rows for this PR
+    so the Approval Workflow queue doesn't show a stale pending item once the
+    simple Approve/Send Back/Decline action has already decided the PR."""
+    status = "approved" if decision == "approve" else "rejected"
+    await execute(db, """
+        UPDATE approvals SET status = :s, acted_by = :u, acted_at = now(), comments = :c
+        WHERE entity_type = 'requisition' AND entity_id = :id AND status = 'pending'
+    """, {"s": status, "u": user["sub"], "c": comments, "id": req_id})
+
+
 @router.get("")
-async def list_requisitions(status: str | None = None,
+async def list_requisitions(status: str | None = None, category_id: str | None = None,
                             db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
-    where = "WHERE (CAST(:status AS TEXT) IS NULL OR r.status = :status)"
+    where = """WHERE (CAST(:status AS TEXT) IS NULL OR r.status = :status)
+               AND (CAST(:category_id AS TEXT) IS NULL OR r.category_id = :category_id)"""
     return await fetch_all(db, f"""
         SELECT r.*, d.name AS department_name, c.name AS category_name,
                b.name AS branch_name, u.full_name AS requester_name
@@ -42,7 +58,7 @@ async def list_requisitions(status: str | None = None,
         JOIN branches b ON b.id = r.branch_id
         JOIN users u ON u.id = r.requester_id
         {where} ORDER BY r.created_at DESC
-    """, {"status": status})
+    """, {"status": status, "category_id": category_id})
 
 
 @router.get("/{req_id:path}/detail")
@@ -68,7 +84,9 @@ async def get_requisition(req_id: str, db: AsyncSession = Depends(get_db),
         LEFT JOIN users au ON au.id = a.acted_by
         WHERE a.entity_type = 'requisition' AND a.entity_id = :id ORDER BY a.stage_no
     """, {"id": req_id})
-    return {**req, "lines": lines, "approvals": approvals}
+    rfqs = await fetch_all(db, "SELECT id, status FROM rfqs WHERE requisition_id = :id ORDER BY created_at DESC", {"id": req_id})
+    pos = await fetch_all(db, "SELECT id, status FROM purchase_orders WHERE requisition_id = :id ORDER BY issued_at DESC", {"id": req_id})
+    return {**req, "lines": lines, "approvals": approvals, "rfqs": rfqs, "purchase_orders": pos}
 
 
 @router.post("")
@@ -84,7 +102,7 @@ async def create_requisition(body: ReqCreate, db: AsyncSession = Depends(get_db)
         VALUES (:id, :t, :d, :c, :b, :cc, :u, :j, CAST(:f AS jsonb), :amt, 'draft')
     """, {"id": req_id, "t": body.title, "d": body.department_id, "c": body.category_id,
           "b": body.branch_id, "cc": body.cost_center, "u": user["sub"], "j": body.justification,
-          "f": __import__("json").dumps(body.statutory_flags), "amt": total})
+          "f": json.dumps(body.statutory_flags), "amt": total})
     for l in body.lines:
         await execute(db, """
             INSERT INTO requisition_lines (requisition_id, description, quantity, uom, est_unit_price, gl_code)
@@ -96,19 +114,97 @@ async def create_requisition(body: ReqCreate, db: AsyncSession = Depends(get_db)
     return {"id": req_id, "total_amount": total, "status": "draft"}
 
 
+@router.put("/{req_id:path}")
+async def update_requisition(req_id: str, body: ReqCreate, db: AsyncSession = Depends(get_db),
+                             user: dict = Depends(get_current_user)):
+    """Edit an own draft/sent_back PR (Requester), then resubmit."""
+    req = await fetch_one(db, "SELECT * FROM requisitions WHERE id = :id", {"id": req_id})
+    if not req:
+        raise HTTPException(404, "Requisition not found")
+    if req["status"] not in ("draft", "sent_back"):
+        raise HTTPException(400, f"Cannot edit from status '{req['status']}'")
+    if req["requester_id"] != user["sub"] and user["role"] != "admin":
+        raise HTTPException(403, "Only the requester can edit this PR")
+    total = sum(l.quantity * l.est_unit_price for l in body.lines)
+    await execute(db, """
+        UPDATE requisitions SET title = :t, department_id = :d, category_id = :c, branch_id = :b,
+            cost_center = :cc, justification = :j, statutory_flags = CAST(:f AS jsonb),
+            total_amount = :amt, updated_at = now()
+        WHERE id = :id
+    """, {"t": body.title, "d": body.department_id, "c": body.category_id, "b": body.branch_id,
+          "cc": body.cost_center, "j": body.justification, "f": json.dumps(body.statutory_flags),
+          "amt": total, "id": req_id})
+    await execute(db, "DELETE FROM requisition_lines WHERE requisition_id = :id", {"id": req_id})
+    for l in body.lines:
+        await execute(db, """
+            INSERT INTO requisition_lines (requisition_id, description, quantity, uom, est_unit_price, gl_code)
+            VALUES (:r, :d, :q, :u, :p, :g)
+        """, {"r": req_id, "d": l.description, "q": l.quantity, "u": l.uom,
+              "p": l.est_unit_price, "g": l.gl_code})
+    await log_action(db, user["sub"], user["name"], "Edited requisition", "requisition", req_id,
+                     f"₹{total:,.0f} · {len(body.lines)} lines")
+    return {"id": req_id, "total_amount": total, "status": req["status"]}
+
+
 @router.post("/{req_id:path}/submit")
 async def submit_requisition(req_id: str, db: AsyncSession = Depends(get_db),
                              user: dict = Depends(get_current_user)):
     req = await fetch_one(db, "SELECT * FROM requisitions WHERE id = :id", {"id": req_id})
     if not req:
         raise HTTPException(404, "Requisition not found")
-    if req["status"] != "draft":
+    if req["status"] not in ("draft", "sent_back"):
         raise HTTPException(400, f"Cannot submit from status '{req['status']}'")
-    msme_pref = (req["statutory_flags"] or {}).get("msme_pref", False)
-    result = await approval_engine.route(db, "requisition", req_id, float(req["total_amount"]),
-                                         req["department_id"], req["category_id"], msme_pref, user)
-    new_status = "approved" if result["auto_approved"] else "pending_approval"
-    await execute(db, "UPDATE requisitions SET status = :s, updated_at = now() WHERE id = :id",
-                  {"s": new_status, "id": req_id})
-    return {"id": req_id, "status": new_status,
-            "stages": result["stages"], "auto_approved": result["auto_approved"]}
+    await execute(db, "UPDATE requisitions SET status = 'pending_approval', updated_at = now() WHERE id = :id",
+                  {"id": req_id})
+    await log_action(db, user["sub"], user["name"], "Submitted requisition for approval", "requisition", req_id, "")
+    return {"id": req_id, "status": "pending_approval"}
+
+
+class DecisionBody(BaseModel):
+    comments: str = ""
+
+
+@router.post("/{req_id:path}/approve")
+async def approve_requisition(req_id: str, body: DecisionBody, db: AsyncSession = Depends(get_db),
+                              user: dict = Depends(require_roles(*APPROVER_ROLES))):
+    req = await fetch_one(db, "SELECT * FROM requisitions WHERE id = :id", {"id": req_id})
+    if not req:
+        raise HTTPException(404, "Requisition not found")
+    if req["status"] != "pending_approval":
+        raise HTTPException(409, f"PR is '{req['status']}', not pending_approval")
+    await execute(db, "UPDATE requisitions SET status = 'approved', updated_at = now() WHERE id = :id", {"id": req_id})
+    await _resolve_pending_approvals(db, req_id, "approve", user, body.comments)
+    await log_action(db, user["sub"], user["name"], "Approved requisition", "requisition", req_id, body.comments)
+    return {"id": req_id, "status": "approved"}
+
+
+@router.post("/{req_id:path}/send-back")
+async def send_back_requisition(req_id: str, body: DecisionBody, db: AsyncSession = Depends(get_db),
+                                user: dict = Depends(require_roles(*APPROVER_ROLES))):
+    req = await fetch_one(db, "SELECT * FROM requisitions WHERE id = :id", {"id": req_id})
+    if not req:
+        raise HTTPException(404, "Requisition not found")
+    if req["status"] != "pending_approval":
+        raise HTTPException(409, f"PR is '{req['status']}', not pending_approval")
+    if not body.comments.strip():
+        raise HTTPException(400, "A reason is required when sending a PR back")
+    await execute(db, "UPDATE requisitions SET status = 'sent_back', updated_at = now() WHERE id = :id", {"id": req_id})
+    await _resolve_pending_approvals(db, req_id, "reject", user, body.comments)
+    await log_action(db, user["sub"], user["name"], "Sent requisition back", "requisition", req_id, body.comments)
+    return {"id": req_id, "status": "sent_back"}
+
+
+@router.post("/{req_id:path}/decline")
+async def decline_requisition(req_id: str, body: DecisionBody, db: AsyncSession = Depends(get_db),
+                              user: dict = Depends(require_roles(*APPROVER_ROLES))):
+    req = await fetch_one(db, "SELECT * FROM requisitions WHERE id = :id", {"id": req_id})
+    if not req:
+        raise HTTPException(404, "Requisition not found")
+    if req["status"] != "pending_approval":
+        raise HTTPException(409, f"PR is '{req['status']}', not pending_approval")
+    if not body.comments.strip():
+        raise HTTPException(400, "A reason is required to decline a PR")
+    await execute(db, "UPDATE requisitions SET status = 'declined', updated_at = now() WHERE id = :id", {"id": req_id})
+    await _resolve_pending_approvals(db, req_id, "reject", user, body.comments)
+    await log_action(db, user["sub"], user["name"], "Declined requisition", "requisition", req_id, body.comments)
+    return {"id": req_id, "status": "declined"}

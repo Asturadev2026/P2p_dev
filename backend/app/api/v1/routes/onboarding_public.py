@@ -142,6 +142,28 @@ async def submit_onboard(token: str, payload: dict = Body(default={}), db: Async
     await execute(db, "UPDATE vendor_onboarding SET vendor_id = :v WHERE id = :id",
                   {"v": vendor_id, "id": onb["id"]})
 
+    # Product catalog -> vendor_products, so Procurement's RFQ vendor matching can query
+    # it directly instead of parsing kyc_payload JSON. Demo-safe: skips malformed rows.
+    for item in (p.get("products_data") or []):
+        if not isinstance(item, dict) or not item.get("name") or not item.get("category"):
+            continue
+        try:
+            gst_rate = float(item["gst_rate"]) if item.get("gst_rate") not in (None, "") else None
+        except (TypeError, ValueError):
+            gst_rate = None
+        try:
+            basic_rate = float(item["basic_rate"]) if item.get("basic_rate") not in (None, "") else None
+        except (TypeError, ValueError):
+            basic_rate = None
+        await execute(db, """
+            INSERT INTO vendor_products (vendor_id, product_name, product_code, category, sub_category,
+                                         uom, hsn_sac_code, gst_rate, basic_rate, payment_terms, status)
+            VALUES (:v, :name, :code, :cat, :sub, :uom, :hsn, :gst, :rate, :terms, 'active')
+        """, {"v": vendor_id, "name": item.get("name"), "code": item.get("sku"),
+              "cat": item.get("category"), "sub": item.get("sub_category"), "uom": item.get("uom"),
+              "hsn": item.get("hsn_sac"), "gst": gst_rate, "rate": basic_rate,
+              "terms": item.get("payment_terms")})
+
     # Server-side verifications (GST/PAN/MSME/Bank/DTAA) — always run here
     fresh = await fetch_one(db, "SELECT * FROM vendor_onboarding WHERE id = :id", {"id": onb["id"]})
     results = await vendor_service.run_verifications(db, fresh, vendor_id)

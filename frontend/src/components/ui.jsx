@@ -109,6 +109,12 @@ const CHIP_MAP = {
   partially_settled: "chip-amber", converted_po: "chip-green", converted_rfq: "chip-blue",
   quoted: "chip-amber", awarded: "chip-green", recorded: "chip-blue", validated: "chip-green",
   msme_priority: "chip-orange", partially_received: "chip-amber",
+  // procurement workflow (PR / RFQ / PO / GRN)
+  sent_back: "chip-amber", rfq_issued: "chip-blue", quotation_comparison: "chip-purple",
+  po_created: "chip-blue", sent: "chip-blue", quotations_received: "chip-purple",
+  finalized: "chip-green", cancelled: "chip-red",
+  awaiting_delivery: "chip-amber", goods_received: "chip-green", submitted: "chip-amber",
+  fully_received: "chip-green", partial: "chip-amber", received_with_rejection: "chip-red",
 };
 
 export function Chip({ value, label }) {
