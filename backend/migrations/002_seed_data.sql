@@ -9,12 +9,14 @@ BEGIN;
 
 -- ---------- Branches ----------
 INSERT INTO branches (id, name, state, city, is_head_office) VALUES
- ('BR-HO',      'Head Office · AXIS, BMC Chowk, GT Road', 'Punjab', 'Jalandhar', TRUE),
- ('BR-LDH-001', 'Ludhiana Branch',  'Punjab',        'Ludhiana',  FALSE),
- ('BR-AMR-002', 'Amritsar Branch',  'Punjab',        'Amritsar',  FALSE),
- ('BR-DEL-003', 'Delhi NCR Branch', 'Delhi',         'New Delhi', FALSE),
- ('BR-JPR-004', 'Jaipur Branch',    'Rajasthan',     'Jaipur',    FALSE),
- ('BR-LKO-005', 'Lucknow Branch',   'Uttar Pradesh', 'Lucknow',   FALSE);
+ ('BR-HO',      'Jalandhar HO',      'Punjab',        'Jalandhar', TRUE),
+ ('BR-LDH-001', 'Ludhiana Branch',   'Punjab',        'Ludhiana',  FALSE),
+ ('BR-AMR-002', 'Amritsar Branch',   'Punjab',        'Amritsar',  FALSE),
+ ('BR-DEL-003', 'Patna Regional',    'Bihar',         'Patna',     FALSE),
+ ('BR-JPR-004', 'Kolkata Regional',  'West Bengal',   'Kolkata',   FALSE),
+ ('BR-LKO-005', 'Lucknow Regional',  'Uttar Pradesh', 'Lucknow',   FALSE),
+ ('BR-RAN-006', 'Ranchi Branch',     'Jharkhand',     'Ranchi',    FALSE),
+ ('BR-GHY-007', 'Guwahati Branch',   'Assam',         'Guwahati',  FALSE);
 
 -- ---------- Departments ----------
 INSERT INTO departments (id, name, description) VALUES

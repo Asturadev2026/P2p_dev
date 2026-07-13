@@ -386,40 +386,70 @@ export function Requisitions() {
 }
 
 /* ============ Manual quotation entry ============ */
-function ManualQuoteForm({ invited, onAdd, onCancel }) {
+const PAYMENT_TERMS_OPTIONS = ["30 days", "45 days", "Net 60 days", "Advance"];
+
+function ManualQuoteForm({ invited, totalQty, onAdd, onCancel }) {
   const [vendorId, setVendorId] = useState("");
-  const [amount, setAmount] = useState("");
+  const [quoteRef, setQuoteRef] = useState("");
+  const [unitPrice, setUnitPrice] = useState("");
   const [gstRate, setGstRate] = useState(18);
   const [deliveryDays, setDeliveryDays] = useState("");
-  const [paymentTerms, setPaymentTerms] = useState("");
-  const [notes, setNotes] = useState("");
-  const inputStyle = { height: 34, border: "1px solid var(--hairline-strong)", borderRadius: 7, padding: "0 8px" };
+  const [paymentTerms, setPaymentTerms] = useState(PAYMENT_TERMS_OPTIONS[0]);
+  const [file, setFile] = useState(null);
+  const [saving, setSaving] = useState(false);
 
-  const add = () => {
-    if (!vendorId || !amount) return;
-    onAdd({ vendor_id: vendorId, amount: +amount, gst_rate: +gstRate || 18,
-      delivery_days: deliveryDays ? +deliveryDays : null, payment_terms: paymentTerms || null, notes: notes || null });
+  const save = async () => {
+    if (!vendorId || !unitPrice) return;
+    const gst = +gstRate || 18;
+    const amount = Math.round(+unitPrice * (totalQty || 1) * (1 + gst / 100) * 100) / 100;
+    setSaving(true);
+    try {
+      await onAdd({
+        vendor_id: vendorId, amount, gst_rate: gst,
+        delivery_days: deliveryDays ? +deliveryDays : null,
+        payment_terms: paymentTerms || null,
+        notes: quoteRef ? `Quote ref: ${quoteRef}` : null,
+      }, file);
+    } finally { setSaving(false); }
   };
 
   return (
-    <div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1.1fr 0.8fr 1fr 1.3fr", gap: 8, marginBottom: 8 }}>
-        <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} style={inputStyle}>
-          <option value="">Vendor…</option>
-          {invited.filter((v) => !v.is_off_system).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.vendor_name}</option>)}
-        </select>
-        <input type="number" placeholder="Total incl. GST ₹" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} />
-        <input type="number" placeholder="GST %" value={gstRate} onChange={(e) => setGstRate(e.target.value)} style={inputStyle} />
-        <input type="number" placeholder="Delivery days" value={deliveryDays} onChange={(e) => setDeliveryDays(e.target.value)} style={inputStyle} />
-        <input placeholder="Payment terms" value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} style={inputStyle} />
+    <Modal title="Enter Manual Quotation" onClose={onCancel}
+      footer={<div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn-gho" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-pri" disabled={!vendorId || !unitPrice || saving} onClick={save}>
+          {saving ? "Saving…" : "Save Quotation"}
+        </button>
+      </div>}>
+      <div style={{ color: "var(--ink-500)", fontSize: 12.5, marginBottom: 14 }}>
+        For vendors who replied via email or hand-delivered quote
       </div>
-      <input placeholder="Remarks (optional)" value={notes} onChange={(e) => setNotes(e.target.value)}
-        style={{ ...inputStyle, width: "100%", marginBottom: 8 }} />
-      <div style={{ display: "flex", gap: 8 }}>
-        <button className="btn btn-pri btn-sm" onClick={add}>+ Add Quotation</button>
-        {onCancel && <button className="btn btn-gho btn-sm" onClick={onCancel}>Cancel</button>}
+      <div className="form-row">
+        <div className="field"><label>Vendor</label>
+          <select value={vendorId} onChange={(e) => setVendorId(e.target.value)}>
+            <option value="">Select vendor…</option>
+            {invited.filter((v) => !v.is_off_system).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.vendor_name}</option>)}
+          </select></div>
+        <div className="field"><label>Quote reference (optional)</label>
+          <input placeholder="QT-VENDOR-XXXX" value={quoteRef} onChange={(e) => setQuoteRef(e.target.value)} /></div>
       </div>
-    </div>
+      <div className="form-row-3">
+        <div className="field"><label>Unit price (₹)</label>
+          <input type="number" min={0} value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} /></div>
+        <div className="field"><label>GST %</label>
+          <input type="number" min={0} value={gstRate} onChange={(e) => setGstRate(e.target.value)} /></div>
+        <div className="field"><label>Delivery (days)</label>
+          <input type="number" min={0} value={deliveryDays} onChange={(e) => setDeliveryDays(e.target.value)} /></div>
+      </div>
+      <div className="form-row">
+        <div className="field"><label>Payment terms</label>
+          <select value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)}>
+            {PAYMENT_TERMS_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select></div>
+        <div className="field"><label>Signed quotation file</label>
+          <input type="file" onChange={(e) => setFile(e.target.files[0] || null)} /></div>
+      </div>
+    </Modal>
   );
 }
 
@@ -612,9 +642,15 @@ function ComparisonPage({ rfqId, onBack, toast, refreshList, navigate }) {
     try { await api.post(`/procurement/rfqs/${rfqId}/send`); toast("RFQ sent"); load(); refreshList(); }
     catch (e) { toast(e.message, true); }
   };
-  const addQuote = async (body) => {
-    try { await api.post(`/procurement/rfqs/${rfqId}/quotations`, body); toast("Quotation added"); setShowManual(false); load(); refreshList(); }
-    catch (e) { toast(e.message, true); }
+  const addQuote = async (body, file) => {
+    try {
+      await api.post(`/procurement/rfqs/${rfqId}/quotations`, body);
+      if (file) {
+        const fd = new FormData(); fd.append("file", file);
+        await api.postForm(`/procurement/rfqs/${rfqId}/quotations/${body.vendor_id}/document`, fd);
+      }
+      toast("Quotation added"); setShowManual(false); load(); refreshList();
+    } catch (e) { toast(e.message, true); }
   };
   const simulate = async () => {
     try {
@@ -705,9 +741,7 @@ function ComparisonPage({ rfqId, onBack, toast, refreshList, navigate }) {
       )}
 
       {showManual && (
-        <Card title="Enter quotation">
-          <ManualQuoteForm invited={detail.invited_vendors} onAdd={addQuote} onCancel={() => setShowManual(false)} />
-        </Card>
+        <ManualQuoteForm invited={detail.invited_vendors} totalQty={totalQty} onAdd={addQuote} onCancel={() => setShowManual(false)} />
       )}
 
       {quotes.length > 0 && (
@@ -1458,6 +1492,35 @@ function GrnRecordPage({ po, onCancel, onDone, toast }) {
 }
 
 /* ============ GRNs ============ */
+function RecordGrnModal({ onClose, onContinue }) {
+  const { data: pos, loading } = useFetch(() => api.get("/procurement/pos"), []);
+  const [poId, setPoId] = useState("");
+  const eligible = (pos || []).filter((p) => ["active", "awaiting_delivery"].includes(p.status));
+
+  useEffect(() => {
+    if (!poId && eligible.length) setPoId(eligible[0].id);
+  }, [pos]);
+
+  return (
+    <Modal title="Record GRN" onClose={onClose}
+      footer={<div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn-gho" onClick={onClose}>Cancel</button>
+        <button className="btn btn-pri" disabled={!poId} onClick={() => onContinue(poId)}>Continue →</button>
+      </div>}>
+      <div style={{ color: "var(--ink-500)", fontSize: 12.5, marginBottom: 10 }}>Select PO against which goods received</div>
+      {loading ? <Loading /> : !eligible.length ? (
+        <div className="empty">No POs awaiting goods receipt.</div>
+      ) : (
+        <div className="field"><label>PO</label>
+          <select value={poId} onChange={(e) => setPoId(e.target.value)}>
+            {eligible.map((p) => <option key={p.id} value={p.id}>{p.id} · {p.vendor_name} · {inrFull(p.amount)}</option>)}
+          </select>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export function Grns() {
   const { toast } = useApp();
   const navigate = useNavigate();
@@ -1465,6 +1528,7 @@ export function Grns() {
   const { data, loading, refresh } = useFetch(() => api.get("/procurement/grns"), []);
   const [detail, setDetail] = useState(null);
   const [recordPo, setRecordPo] = useState(null);
+  const [showRecordModal, setShowRecordModal] = useState(false);
   const consumedNavState = useRef(false);
 
   useEffect(() => {
@@ -1476,6 +1540,10 @@ export function Grns() {
   }, [location.state]);
 
   const open = async (r) => setDetail(await api.get(`/procurement/grns/${r.id}/detail`));
+  const chooseGrnPo = async (poId) => {
+    setShowRecordModal(false);
+    setRecordPo(await api.get(`/procurement/pos/${poId}/detail`));
+  };
 
   if (recordPo) {
     return <GrnRecordPage po={recordPo} toast={toast}
@@ -1486,7 +1554,8 @@ export function Grns() {
   if (loading) return <Loading />;
   return (
     <>
-      <PageHead title="Goods Receipt Notes" sub="Received / accepted / rejected reconciliation against PO" />
+      <PageHead title="Goods Receipt Notes" sub="Received / accepted / rejected reconciliation against PO"
+        actions={<button className="btn btn-pri" onClick={() => setShowRecordModal(true)}>+ Record New GRN</button>} />
       <div className="kpi-row">
         <Kpi label="GRNs recorded" value={data.length} note="across branches" />
         <Kpi label="Fully received" value={data.filter((g) => g.status === "fully_received").length} note="all ordered qty accepted" noteClass="up" />
@@ -1525,6 +1594,10 @@ export function Grns() {
             ))}
           </>)}
         </Modal>
+      )}
+
+      {showRecordModal && (
+        <RecordGrnModal onClose={() => setShowRecordModal(false)} onContinue={chooseGrnPo} />
       )}
     </>
   );
