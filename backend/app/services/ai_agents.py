@@ -16,6 +16,7 @@ from app.core.database import execute
 
 settings = get_settings()
 _api_key = os.getenv("OPENAI_API_KEY")
+print(f"[ai_agents] OPENAI_API_KEY loaded: {bool(_api_key)}")
 _client = AsyncOpenAI(api_key=_api_key) if _api_key else None
 
 
@@ -40,7 +41,8 @@ async def _chat_json(system: str, user: str) -> dict | None:
             temperature=0.2,
         )
         return json.loads(resp.choices[0].message.content)
-    except Exception:
+    except Exception as e:
+        print(f"[ai_agents] _chat_json failed: {type(e).__name__}: {e}")  
         return None
 
 
@@ -99,7 +101,8 @@ async def extract_invoice_image(db: AsyncSession, invoice_ref: str, image_bytes:
                 temperature=0.1,
             )
             out = json.loads(resp.choices[0].message.content)
-        except Exception:
+        except Exception as e:
+            print(f"[ai_agents] extract_invoice_image failed: {type(e).__name__}: {e}") 
             out = None
     if out is None:
         out = _fallback_extract("AI OCR unavailable, please review manually")
