@@ -28,6 +28,17 @@ def split_gst(taxable: float, gst_rate: float, vendor_state: str | None) -> dict
     return {"cgst": 0.0, "sgst": 0.0, "igst": gst_total, "gst_total": gst_total}
 
 
+def split_gst_from_amount(gst_total: float, vendor_state: str | None) -> dict:
+    """Same intra- vs inter-state split as split_gst, starting from a known
+    GST total instead of a rate — used when a user enters the GST amount directly
+    (e.g. Capture Inbox review step) rather than a taxable amount + rate."""
+    gst_total = round(float(gst_total or 0), 2)
+    if vendor_state == INTELEZEN_STATE:
+        half = round(gst_total / 2, 2)
+        return {"cgst": half, "sgst": gst_total - half, "igst": 0.0, "gst_total": gst_total}
+    return {"cgst": 0.0, "sgst": 0.0, "igst": gst_total, "gst_total": gst_total}
+
+
 async def compute(db: AsyncSession, taxable: float, gst_rate: float,
                   vendor_state: str | None, tds_section: str | None,
                   rcm_applicable: bool = False) -> dict:

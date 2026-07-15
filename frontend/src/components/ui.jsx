@@ -91,6 +91,7 @@ export function DataTable({ columns, rows, onRow, empty = "Nothing here yet" }) 
 const CHIP_MAP = {
   // invoice stages
   capture: "chip-blue", match: "chip-purple", gst2b: "chip-teal", tds: "chip-amber",
+  captured: "chip-blue", match_pending: "chip-purple",
   approval: "chip-orange", liability: "chip-blue", payments: "chip-amber", paid: "chip-green",
   rejected: "chip-red", on_hold: "chip-red",
   // generic statuses
@@ -98,7 +99,9 @@ const CHIP_MAP = {
   pending: "chip-amber", pending_approval: "chip-amber", approved: "chip-green",
   declined: "chip-red", accepted: "chip-green", draft: "chip-grey",
   auto_matched: "chip-green", exception: "chip-red", matched: "chip-green",
-  mismatch_tax: "chip-red", not_in_2b: "chip-amber", offered: "chip-amber",
+  mismatch_tax: "chip-red", not_in_2b: "chip-amber", pending_sync: "chip-amber", tds_pending: "chip-blue",
+  tds_computed: "chip-purple", tds_ready: "chip-green",
+  offered: "chip-amber",
   released: "chip-green", reconciled: "chip-green", building: "chip-amber", file_generated: "chip-blue",
   in_progress: "chip-amber", won: "chip-green", bidding: "chip-amber", listed: "chip-blue",
   link_sent: "chip-blue", kyc_in_progress: "chip-amber", submitted_for_review: "chip-purple",
