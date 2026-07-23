@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../services/api";
 import { useApp } from "../context/AppContext";
 import { useFetch, Card, DataTable, Chip, Modal, DetailGrid, PageHead, Loading,
@@ -25,7 +25,7 @@ function InvoiceTrace({ id, onClose, onAction }) {
     <Modal wide title={`${inv.id} · ${inv.vendor_name}`} onClose={onClose}
       footer={<>
         {inv.stage === "match" && <button className="btn btn-blu" onClick={runMatch}>Run 3-way match</button>}
-        {!["paid", "rejected"].includes(inv.stage) &&
+        {!["paid", "rejected", "tds", "approval"].includes(inv.stage) &&
           <button className="btn btn-pri" onClick={advance}>Advance stage →</button>}
       </>}>
       <DetailGrid items={[
@@ -80,7 +80,8 @@ const INV_COLS = (extra = []) => [
 
 /* ============ Capture Inbox ============ */
 export function CaptureInbox() {
-  const { toast } = useApp();
+  const { toast, user } = useApp();
+  const isMaker = user?.role === "maker";
   const { data, loading, refresh } = useFetch(() => api.get("/invoices", { stage: "capture" }), []);
   const { data: all } = useFetch(() => api.get("/invoices"), []);
   const { data: vendors } = useFetch(() => api.get("/vendors"), []);
@@ -183,8 +184,10 @@ export function CaptureInbox() {
   const selectedVendor = vendors?.find((v) => v.id === reviewForm?.vendor_id);
   return (
     <>
-      <PageHead title="Capture Inbox" sub="email · WhatsApp · scan · vendor portal — OCR + IRN + duplicate prevention"
-        actions={<button className="btn btn-pri" onClick={() => { resetCapture(); setShowCapture(true); }}>+ Capture invoice</button>} />
+      <PageHead title="Capture Inbox"
+        sub={isMaker ? "email · WhatsApp · scan · vendor portal — OCR + IRN + duplicate prevention" : "View only access — email · WhatsApp · scan · vendor portal"}
+        actions={isMaker &&
+          <button className="btn btn-pri" onClick={() => { resetCapture(); setShowCapture(true); }}>+ Capture invoice</button>} />
       <div className="kpi-row">
         <Kpi label="In capture" value={data.length} note="awaiting QC / match"
           onSummary={() => setSummary({ entity: "invoices", filters: { stage: "capture" }, title: "Invoices in capture" })} />
@@ -204,9 +207,9 @@ export function CaptureInbox() {
           { key: "actions", label: "Action", render: (r) => (
             <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
               <button className="btn btn-gho btn-sm" onClick={() => setTrace(r.id)}>View</button>
-              {r.capture_status === "captured" &&
+              {isMaker && r.capture_status === "captured" &&
                 <button className="btn btn-gho btn-sm" onClick={() => createDraft(r.id)}>Create Draft</button>}
-              {r.capture_status !== "match_pending" &&
+              {isMaker && r.capture_status !== "match_pending" &&
                 <button className="btn btn-blu btn-sm" onClick={() => sendToMatchRow(r.id)}>Send to Match</button>}
             </div>
           ) },
@@ -374,11 +377,18 @@ const CMP_COLS = [
 ];
 
 function MatchDetailModal({ id, onClose, onAction }) {
-  const { toast } = useApp();
+  const { toast, user } = useApp();
+  const isMaker = user?.role === "maker";
+  const isChecker = user?.role === "checker";
   const { data, loading, refresh } = useFetch(() => api.get(`/invoices/${id}/match-detail`), [id]);
   const [busy, setBusy] = useState(false);
   const [confirmMode, setConfirmMode] = useState(null); // null | "exception" | "send_back"
   const [reason, setReason] = useState("");
+  const confirmRef = useRef(null);
+
+  useEffect(() => {
+    if (confirmMode) confirmRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [confirmMode]);
 
   const runMatch = async () => {
     setBusy(true);
@@ -405,9 +415,10 @@ function MatchDetailModal({ id, onClose, onAction }) {
     } catch (e) { toast(e.message, true); } finally { setBusy(false); }
   };
   const sendBackCapture = async () => {
+    if (!reason.trim()) { toast("A remark is required to send back to Capture", true); return; }
     setBusy(true);
     try {
-      await api.post(`/invoices/${id}/send-back-capture`, { note: reason || null });
+      await api.post(`/invoices/${id}/send-back-capture`, { note: reason });
       toast(`${id} sent back to Capture Inbox`);
       onAction?.(); onClose();
     } catch (e) { toast(e.message, true); setBusy(false); }
@@ -416,16 +427,21 @@ function MatchDetailModal({ id, onClose, onAction }) {
   if (loading || !data) return null;
   const { invoice: inv, po, grn, comparison } = data;
   const canGst2b = !!po && !!grn && ["auto_matched", "exception"].includes(inv.match_status);
+  const canGst2bMaker = isMaker && inv.match_status === "auto_matched";
+  const canGst2bChecker = isChecker;
+  const isViewOnly = !isMaker && !isChecker;
 
   return (
     <Modal wide title={`${inv.id} · ${inv.vendor_name} — 3-Way Match`} onClose={onClose}
       footer={<>
-        <button className="btn btn-blu" disabled={busy} onClick={runMatch}>Run 3-Way Match</button>
-        <button className="btn btn-pri" disabled={busy || !canGst2b}
-          title={!canGst2b ? "Needs PO + GRN linked and a matched/exception result" : ""}
-          onClick={sendToGst2b}>Send to GST 2B Recon</button>
-        <button className="btn btn-gho" disabled={busy} onClick={() => setConfirmMode("exception")}>Mark Exception</button>
-        <button className="btn btn-gho" disabled={busy} onClick={() => setConfirmMode("send_back")}>Send Back to Capture</button>
+        {isMaker && <button className="btn btn-blu" disabled={busy} onClick={runMatch}>Run 3-Way Match</button>}
+        {(canGst2bMaker || canGst2bChecker) &&
+          <button className="btn btn-pri" disabled={busy || !canGst2b}
+            title={!canGst2b ? "Needs PO + GRN linked and a matched/exception result" : ""}
+            onClick={sendToGst2b}>Send to GST 2B Recon</button>}
+        {isChecker && <button className="btn btn-gho" disabled={busy} onClick={() => setConfirmMode("exception")}>Mark Exception</button>}
+        {isChecker && <button className="btn btn-gho" disabled={busy} onClick={() => setConfirmMode("send_back")}>Send Back to Capture</button>}
+        {isViewOnly && <span style={{ fontSize: 12, color: "var(--ink-500)" }}>View only access</span>}
       </>}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
         <Chip value={inv.match_status || "match_pending"} />
@@ -437,12 +453,12 @@ function MatchDetailModal({ id, onClose, onAction }) {
       </div>
 
       {confirmMode && (
-        <div style={{ background: "var(--amber-100)", border: "1.5px solid var(--amber-500)", borderRadius: 9,
+        <div ref={confirmRef} style={{ background: "var(--amber-100)", border: "1.5px solid var(--amber-500)", borderRadius: 9,
           padding: "12px 15px", marginBottom: 14 }}>
           <div style={{ fontWeight: 800, color: "var(--amber-700)", marginBottom: 8 }}>
             {confirmMode === "exception" ? "Mark as match exception" : "Send back to Capture Inbox"}
           </div>
-          <div className="field"><label>Reason (optional)</label>
+          <div className="field"><label>{confirmMode === "send_back" ? "Remark (required)" : "Reason (optional)"}</label>
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why?" /></div>
           <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
             <button className="btn btn-gho btn-sm" onClick={() => { setConfirmMode(null); setReason(""); }}>Cancel</button>
@@ -486,6 +502,8 @@ function MatchDetailModal({ id, onClose, onAction }) {
 }
 
 export function MatchQueue() {
+  const { user } = useApp();
+  const isViewOnly = user?.role !== "maker" && user?.role !== "checker";
   const { data, loading, refresh } = useFetch(() => api.get("/invoices", { stage: "match" }), []);
   const [detail, setDetail] = useState(null);
   const [summary, setSummary] = useState(null);
@@ -494,7 +512,8 @@ export function MatchQueue() {
   const failed = data.filter((i) => i.match_status === "failed");
   return (
     <>
-      <PageHead title="3-Way Match Queue" sub="Invoice ↔ PO ↔ GRN · tolerance: price ±2% · qty 0% · GST exact · auto-approve ≥95%" />
+      <PageHead title="3-Way Match Queue"
+        sub={isViewOnly ? "View only access — Invoice ↔ PO ↔ GRN comparison" : "Invoice ↔ PO ↔ GRN · tolerance: price ±2% · qty 0% · GST exact · auto-approve ≥95%"} />
       <div className="kpi-row">
         <Kpi label="In match queue" value={data.length} note={inr(data.reduce((s, i) => s + +i.total_amount, 0)) + " total"}
           onSummary={() => setSummary({ entity: "invoices", filters: { stage: "match" }, title: "Match queue" })} />
@@ -529,12 +548,15 @@ const GST2B_RECOMMENDATION = {
 };
 
 function Gst2bDetailModal({ record, onClose, onAction }) {
-  const { toast } = useApp();
+  const { user, toast } = useApp();
   const [busy, setBusy] = useState(false);
   const [showRemark, setShowRemark] = useState(false);
   const [remark, setRemark] = useState("");
   const id = record.invoice_id;
   const diff = record.gst_in_2b != null ? Number(record.gst_in_book || 0) - Number(record.gst_in_2b) : null;
+  const isMaker = user?.role === "maker";
+  const isCompliance = user?.role === "compliance";
+  const isViewOnly = !isMaker && !isCompliance;
 
   const markItc = async () => {
     setBusy(true);
@@ -559,15 +581,20 @@ function Gst2bDetailModal({ record, onClose, onAction }) {
   };
 
   const cannotMove = record.status === "mismatch_tax" || record.status === "pending_sync";
+  const makerBlocked = isMaker && record.status !== "matched";
   return (
     <Modal title={`${id} · ${record.vendor_name} — GST 2B`} onClose={onClose}
       footer={<>
-        <button className="btn btn-blu" disabled={busy} onClick={markItc}>Mark ITC Eligible</button>
-        <button className="btn btn-gho" disabled={busy} onClick={markHold}>Mark Payment Hold</button>
-        <button className="btn btn-gho" disabled={busy} onClick={() => setShowRemark((s) => !s)}>Add GST Remark</button>
-        <button className="btn btn-pri" disabled={busy || cannotMove}
-          title={cannotMove ? "Resolve the tax mismatch (or sync first) before moving on" : ""}
-          onClick={moveToTds}>Move to TDS Engine</button>
+        {isCompliance && <button className="btn btn-blu" disabled={busy} onClick={markItc}>Mark ITC Eligible</button>}
+        {isCompliance && <button className="btn btn-gho" disabled={busy} onClick={markHold}>Mark Payment Hold</button>}
+        {(isMaker || isCompliance) &&
+          <button className="btn btn-gho" disabled={busy} onClick={() => setShowRemark((s) => !s)}>Add GST Remark</button>}
+        {(isMaker || isCompliance) &&
+          <button className="btn btn-pri" disabled={busy || cannotMove || makerBlocked}
+            title={makerBlocked ? "Maker can only move clean/matched GST records — issues need Compliance review"
+                  : cannotMove ? "Resolve the tax mismatch (or sync first) before moving on" : ""}
+            onClick={moveToTds}>Move to TDS Engine</button>}
+        {isViewOnly && <span className="muted" style={{ alignSelf: "center" }}>View only access</span>}
       </>}>
       {showRemark && (
         <div className="field"><label>Remark</label>
@@ -594,9 +621,12 @@ function Gst2bDetailModal({ record, onClose, onAction }) {
 }
 
 export function Gst2b() {
-  const { toast } = useApp();
+  const { user, toast } = useApp();
   const { data, loading, refresh } = useFetch(() => api.get("/invoices/gst2b/records"), []);
   const [detail, setDetail] = useState(null);
+  const isMaker = user?.role === "maker";
+  const isCompliance = user?.role === "compliance";
+  const canSync = isMaker || isCompliance;
   const sync = async () => {
     try { const res = await api.post("/invoices/gst2b/sync");
       toast(`2B sync · period ${res.period} · ${res.synced} reconciled`); refresh();
@@ -606,8 +636,9 @@ export function Gst2b() {
   const m = (s) => data.filter((r) => r.status === s).length;
   return (
     <>
-      <PageHead title="GST 2B Reconciliation" sub="GSTN feed · ITC eligibility · vendor filing watch"
-        actions={<button className="btn btn-blu" onClick={sync}>Sync GSTR-2B now</button>} />
+      <PageHead title="GST 2B Reconciliation"
+        sub={canSync ? "GSTN feed · ITC eligibility · vendor filing watch" : "View only access — GSTN feed · ITC eligibility · vendor filing watch"}
+        actions={canSync ? <button className="btn btn-blu" onClick={sync}>Sync GSTR-2B now</button> : null} />
       <div className="kpi-row">
         <Kpi label="Matched · ITC eligible" value={m("matched")} noteClass="up" note="input credit protected" />
         <Kpi label="Tax mismatch" value={m("mismatch_tax")} noteClass="down" note="payment hold recommended" />
@@ -636,13 +667,16 @@ export function Gst2b() {
 const TDS_SECTIONS = ["194C", "194J", "194I", "194D"];
 
 function TdsDetailModal({ id, onClose, onAction }) {
-  const { toast } = useApp();
+  const { user, toast } = useApp();
   const { data, loading, refresh } = useFetch(() => api.get(`/invoices/${id}/tds-detail`), [id]);
   const [busy, setBusy] = useState(false);
   const [showOverride, setShowOverride] = useState(false);
   const [section, setSection] = useState("");
   const [rate, setRate] = useState("");
   const [reason, setReason] = useState("");
+  const isMaker = user?.role === "maker";
+  const isCompliance = user?.role === "compliance";
+  const isViewOnly = !isMaker && !isCompliance;
 
   const compute = async () => {
     setBusy(true);
@@ -689,12 +723,15 @@ function TdsDetailModal({ id, onClose, onAction }) {
   return (
     <Modal title={`${inv.id} · ${inv.vendor_name} — TDS`} onClose={onClose}
       footer={<>
-        <button className="btn btn-blu" disabled={busy} onClick={compute}>Auto-compute TDS</button>
-        <button className="btn btn-gho" disabled={busy} onClick={openOverride}>Override Section / Rate</button>
-        <button className="btn btn-gho" disabled={busy} onClick={saveTds}>Save TDS</button>
-        <button className="btn btn-pri" disabled={busy || inv.tds_status !== "tds_ready"}
-          title={inv.tds_status !== "tds_ready" ? "Save TDS first" : ""}
-          onClick={sendToApproval}>Send to Approval Workflow</button>
+        {isMaker && <button className="btn btn-blu" disabled={busy} onClick={compute}>Auto-compute TDS</button>}
+        {isCompliance && <button className="btn btn-gho" disabled={busy} onClick={openOverride}>Override Section / Rate</button>}
+        {(isMaker || isCompliance) &&
+          <button className="btn btn-gho" disabled={busy} onClick={saveTds}>Save TDS</button>}
+        {(isMaker || isCompliance) &&
+          <button className="btn btn-pri" disabled={busy || inv.tds_status !== "tds_ready"}
+            title={inv.tds_status !== "tds_ready" ? "Save TDS first" : ""}
+            onClick={sendToApproval}>Send to Approval Workflow</button>}
+        {isViewOnly && <span className="muted" style={{ alignSelf: "center" }}>View only access</span>}
       </>}>
       {panMissing && (
         <div style={{ background: "var(--red-100)", border: "1.5px solid var(--red-500)", borderRadius: 9,
@@ -742,13 +779,17 @@ function TdsDetailModal({ id, onClose, onAction }) {
 }
 
 export function TdsEngine() {
+  const { user } = useApp();
   const { data, loading, refresh } = useFetch(() => api.get("/invoices/tds/queue"), []);
   const [detail, setDetail] = useState(null);
   const [summary, setSummary] = useState(null);
+  const canAct = user?.role === "maker" || user?.role === "compliance";
   if (loading) return <Loading />;
   return (
     <>
-      <PageHead title="TDS Engine" sub="Section-wise computation at source · PAN-verified · challan-ready" />
+      <PageHead title="TDS Engine"
+        sub={canAct ? "Section-wise computation at source · PAN-verified · challan-ready"
+                    : "View only access — Section-wise computation at source · PAN-verified · challan-ready"} />
       <div className="kpi-row">
         {data.summary.map((s) => (
           <Kpi key={s.tds_section} label={`${s.tds_section}`} value={inr(s.total)}

@@ -7,18 +7,53 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
-from app.core.security import get_current_user
+from app.core.security import get_current_user, deny_roles, require_exact_roles
 from app.services import match_engine, tax_engine, approval_engine, ai_agents, integration_service
 from app.utils.audit import log_action
 
-router = APIRouter(prefix="/invoices", tags=["invoices"])
+# Requesters raise PRs only — no access to the AP invoice pipeline (capture through approval).
+router = APIRouter(prefix="/invoices", tags=["invoices"],
+                   dependencies=[Depends(deny_roles("requester", message="Requesters have no access to invoices"))])
 
 STAGE_ORDER = ["capture", "match", "gst2b", "tds", "approval", "liability", "payments", "paid"]
+
+# Only AP Maker performs Capture Inbox write actions (upload/paste/OCR/draft/send-to-match) —
+# view access for other internal roles is handled by the plain get_current_user reads.
+_MAKER_ONLY = require_exact_roles("maker", message="Only AP Maker can perform Capture Inbox actions.")
+
+# 3-Way Match write actions: Maker runs the match and forwards clean results; Checker
+# reviews/clears exceptions and sends mismatches back. View access for other internal
+# roles is handled by the plain get_current_user reads.
+_MATCH_ACTION_MSG = "You do not have permission for this 3-Way Match action."
+_MATCH_MAKER_ONLY = require_exact_roles("maker", message=_MATCH_ACTION_MSG)
+_MATCH_CHECKER_ONLY = require_exact_roles("checker", message=_MATCH_ACTION_MSG)
+_MATCH_MAKER_OR_CHECKER = require_exact_roles("maker", "checker", message=_MATCH_ACTION_MSG)
+
+# GST 2B Recon write actions: Maker preps/syncs and forwards clean records; Compliance
+# reviews mismatch/ITC issues and clears them. View access for other internal roles is
+# handled by the plain get_current_user reads.
+_GST2B_ACTION_MSG = "You do not have permission for this GST 2B action."
+_GST2B_COMPLIANCE_ONLY = require_exact_roles("compliance", message=_GST2B_ACTION_MSG)
+_GST2B_MAKER_OR_COMPLIANCE = require_exact_roles("maker", "compliance", message=_GST2B_ACTION_MSG)
+
+# TDS Engine write actions: Maker computes/saves/sends clean TDS at the standard rate;
+# Compliance only steps in to override a section/rate exception, then saves/sends after
+# resolving it. View access for other internal roles is handled by the plain
+# get_current_user reads.
+_TDS_ACTION_MSG = "You do not have permission for this TDS Engine action."
+_TDS_MAKER_ONLY = require_exact_roles("maker", message=_TDS_ACTION_MSG)
+_TDS_COMPLIANCE_ONLY = require_exact_roles("compliance", message=_TDS_ACTION_MSG)
+_TDS_MAKER_OR_COMPLIANCE = require_exact_roles("maker", "compliance", message=_TDS_ACTION_MSG)
+
+
+_PAYMENTS_QUEUE_ROLES = ("treasury", "fc", "cfo", "auditor")
 
 
 @router.get("")
 async def list_invoices(stage: str | None = None, db: AsyncSession = Depends(get_db),
                         user: dict = Depends(get_current_user)):
+    if stage == "payments" and user["role"] not in _PAYMENTS_QUEUE_ROLES:
+        raise HTTPException(403, "You do not have permission to view Payment Batch.")
     return await fetch_all(db, """
         SELECT i.*, v.name AS vendor_name, v.is_msme, v.gstin AS vendor_gstin
         FROM invoices i JOIN vendors v ON v.id = i.vendor_id
@@ -205,7 +240,7 @@ async def _capture_pipeline(db: AsyncSession, user: dict, extract: dict, source:
 
 @router.post("/capture")
 async def capture_invoice(body: CaptureBody, db: AsyncSession = Depends(get_db),
-                          user: dict = Depends(get_current_user)):
+                          user: dict = Depends(_MAKER_ONLY)):
     """Text capture: OCR-extract, validate mandatory fields, create at 'capture'.
     preview=True stops after extraction so the Capture Inbox review step can
     show editable fields before anything is written to the database."""
@@ -220,7 +255,7 @@ async def capture_invoice_file(file: UploadFile = File(...), source: str = Form(
                                vendor_id: str | None = Form(None), po_id: str | None = Form(None),
                                preview: bool = Form(False),
                                db: AsyncSession = Depends(get_db),
-                               user: dict = Depends(get_current_user)):
+                               user: dict = Depends(_MAKER_ONLY)):
     """Upload capture: PDF (text layer), image (GPT-4o vision), or plain text."""
     data = await file.read()
     if len(data) > 10 * 1024 * 1024:
@@ -275,7 +310,7 @@ class CaptureConfirmBody(BaseModel):
 
 @router.post("/capture-confirm")
 async def capture_confirm(body: CaptureConfirmBody, db: AsyncSession = Depends(get_db),
-                          user: dict = Depends(get_current_user)):
+                          user: dict = Depends(_MAKER_ONLY)):
     """Persist an invoice from the Capture Inbox review step, once the user has
     verified/edited the OCR-extracted fields. `action` decides where it lands:
     save -> captured, draft -> draft, send_to_match -> straight into the
@@ -364,7 +399,7 @@ async def capture_confirm(body: CaptureConfirmBody, db: AsyncSession = Depends(g
 
 @router.post("/{invoice_id}/create-draft")
 async def create_draft(invoice_id: str, db: AsyncSession = Depends(get_db),
-                       user: dict = Depends(get_current_user)):
+                       user: dict = Depends(_MAKER_ONLY)):
     """Mark an already-captured invoice sitting in the Capture Inbox as a draft."""
     inv = await fetch_one(db, "SELECT id, stage, capture_status FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
@@ -379,7 +414,7 @@ async def create_draft(invoice_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/{invoice_id}/send-to-match")
 async def send_to_match(invoice_id: str, db: AsyncSession = Depends(get_db),
-                        user: dict = Depends(get_current_user)):
+                        user: dict = Depends(_MAKER_ONLY)):
     """Move a Capture Inbox invoice straight into the 3-Way Match queue."""
     inv = await fetch_one(db, "SELECT id, stage FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
@@ -440,7 +475,7 @@ async def match_detail(invoice_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/{invoice_id}/run-match")
 async def run_match(invoice_id: str, db: AsyncSession = Depends(get_db),
-                    user: dict = Depends(get_current_user)):
+                    user: dict = Depends(_MATCH_MAKER_ONLY)):
     result = await match_engine.run_match(db, invoice_id)
     if "error" in result:
         raise HTTPException(404, result["error"])
@@ -465,7 +500,7 @@ async def run_match(invoice_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/{invoice_id}/send-to-gst2b")
 async def send_to_gst2b(invoice_id: str, db: AsyncSession = Depends(get_db),
-                        user: dict = Depends(get_current_user)):
+                        user: dict = Depends(_MATCH_MAKER_OR_CHECKER)):
     """3-Way Match -> GST 2B Recon. Requires PO + GRN linked and a match result of
     auto_matched or exception — a 'failed' match must be sent back to Capture instead."""
     inv = await fetch_one(db, "SELECT * FROM invoices WHERE id = :id", {"id": invoice_id})
@@ -480,6 +515,8 @@ async def send_to_gst2b(invoice_id: str, db: AsyncSession = Depends(get_db),
         raise HTTPException(400, "Cannot send to GST 2B — GRN is missing")
     if inv["match_status"] not in ("auto_matched", "exception"):
         raise HTTPException(409, "Run 3-Way Match first — only auto_matched or exception invoices can proceed to GST 2B")
+    if user["role"] == "maker" and inv["match_status"] != "auto_matched":
+        raise HTTPException(403, "Maker can only send clean auto-matched invoices — exceptions need Checker review")
 
     await execute(db, """
         UPDATE invoices SET stage = 'gst2b', gst2b_status = 'pending_sync',
@@ -509,7 +546,7 @@ class MatchExceptionBody(BaseModel):
 
 @router.post("/{invoice_id}/mark-exception")
 async def mark_exception(invoice_id: str, body: MatchExceptionBody, db: AsyncSession = Depends(get_db),
-                         user: dict = Depends(get_current_user)):
+                         user: dict = Depends(_MATCH_CHECKER_ONLY)):
     """Manual override: flag an invoice as a match exception regardless of its
     current score (e.g. a reviewer disagrees with an auto_matched result)."""
     inv = await fetch_one(db, "SELECT id, stage, match_detail FROM invoices WHERE id = :id", {"id": invoice_id})
@@ -537,8 +574,10 @@ class StageMove(BaseModel):
 
 @router.post("/{invoice_id}/send-back-capture")
 async def send_back_capture(invoice_id: str, body: StageMove, db: AsyncSession = Depends(get_db),
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(_MATCH_CHECKER_ONLY)):
     """3-Way Match failure -> back to Capture Inbox for correction and re-review."""
+    if not body.note or not body.note.strip():
+        raise HTTPException(400, "A remark is required to send an invoice back to Capture")
     inv = await fetch_one(db, "SELECT id, stage FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -570,6 +609,9 @@ async def advance_stage(invoice_id: str, body: StageMove, db: AsyncSession = Dep
     cur = inv["stage"]
     if cur not in STAGE_ORDER or cur == "paid":
         raise HTTPException(400, f"Cannot advance from stage '{cur}'")
+    if cur in ("tds", "approval"):
+        raise HTTPException(403, "Use the TDS Engine / Approval Workflow actions to move this stage — "
+                                  "this generic endpoint cannot bypass approval routing")
     nxt = STAGE_ORDER[STAGE_ORDER.index(cur) + 1]
 
     if cur == "match" and inv["match_status"] == "exception":
@@ -616,7 +658,7 @@ def _simulate_2b(invoice_id: str, gst_in_book: float) -> tuple[float | None, str
 
 
 @router.post("/gst2b/sync")
-async def sync_gst2b(db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
+async def sync_gst2b(db: AsyncSession = Depends(get_db), user: dict = Depends(_GST2B_MAKER_OR_COMPLIANCE)):
     """Simulated GSTR-2B pull: reconciles every invoice currently at the gst2b
     stage for the current period. Re-running sync recomputes (idempotently,
     per-invoice) rather than skipping already-synced rows, so a correction to
@@ -666,7 +708,7 @@ class Gst2bRemarkBody(BaseModel):
 
 @router.post("/{invoice_id}/gst2b/mark-itc-eligible")
 async def gst2b_mark_itc_eligible(invoice_id: str, db: AsyncSession = Depends(get_db),
-                                  user: dict = Depends(get_current_user)):
+                                  user: dict = Depends(_GST2B_COMPLIANCE_ONLY)):
     inv = await fetch_one(db, "SELECT id, stage FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -682,7 +724,7 @@ async def gst2b_mark_itc_eligible(invoice_id: str, db: AsyncSession = Depends(ge
 
 @router.post("/{invoice_id}/gst2b/mark-payment-hold")
 async def gst2b_mark_payment_hold(invoice_id: str, db: AsyncSession = Depends(get_db),
-                                  user: dict = Depends(get_current_user)):
+                                  user: dict = Depends(_GST2B_COMPLIANCE_ONLY)):
     inv = await fetch_one(db, "SELECT id, stage FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -698,7 +740,7 @@ async def gst2b_mark_payment_hold(invoice_id: str, db: AsyncSession = Depends(ge
 
 @router.post("/{invoice_id}/gst2b/remark")
 async def gst2b_remark(invoice_id: str, body: Gst2bRemarkBody, db: AsyncSession = Depends(get_db),
-                       user: dict = Depends(get_current_user)):
+                       user: dict = Depends(_GST2B_MAKER_OR_COMPLIANCE)):
     inv = await fetch_one(db, "SELECT id FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -708,7 +750,7 @@ async def gst2b_remark(invoice_id: str, body: Gst2bRemarkBody, db: AsyncSession 
 
 @router.post("/{invoice_id}/gst2b/move-to-tds")
 async def gst2b_move_to_tds(invoice_id: str, db: AsyncSession = Depends(get_db),
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(_GST2B_MAKER_OR_COMPLIANCE)):
     inv = await fetch_one(db, "SELECT id, stage, gst2b_status FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -716,6 +758,8 @@ async def gst2b_move_to_tds(invoice_id: str, db: AsyncSession = Depends(get_db),
         raise HTTPException(409, f"Invoice is at stage '{inv['stage']}', not 'gst2b'")
     if inv["gst2b_status"] == "mismatch_tax":
         raise HTTPException(409, "GST 2B tax mismatch — resolve or mark ITC eligible before moving to TDS")
+    if user["role"] == "maker" and inv["gst2b_status"] != "matched":
+        raise HTTPException(403, "Maker can only move clean/matched GST records — issues need Compliance review")
     await execute(db, """
         UPDATE invoices SET stage = 'tds', gst2b_status = 'tds_pending', tds_status = 'tds_pending',
             updated_at = now() WHERE id = :id
@@ -744,7 +788,7 @@ async def tds_detail(invoice_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/{invoice_id}/tds/compute")
 async def tds_compute(invoice_id: str, db: AsyncSession = Depends(get_db),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(_TDS_MAKER_ONLY)):
     """Auto-compute TDS at the section's standard rate: TDS = taxable × rate/100,
     Net Pay = invoice total − TDS."""
     inv = await fetch_one(db, "SELECT * FROM invoices WHERE id = :id", {"id": invoice_id})
@@ -775,7 +819,7 @@ class TdsOverrideBody(BaseModel):
 
 @router.post("/{invoice_id}/tds/override")
 async def tds_override(invoice_id: str, body: TdsOverrideBody, db: AsyncSession = Depends(get_db),
-                       user: dict = Depends(get_current_user)):
+                       user: dict = Depends(_TDS_COMPLIANCE_ONLY)):
     """Manual override of the TDS section/rate. A reason is mandatory whenever the
     section or rate actually changes from what's currently stored."""
     inv = await fetch_one(db, "SELECT * FROM invoices WHERE id = :id", {"id": invoice_id})
@@ -807,7 +851,7 @@ async def tds_override(invoice_id: str, body: TdsOverrideBody, db: AsyncSession 
 
 @router.post("/{invoice_id}/tds/save")
 async def tds_save(invoice_id: str, db: AsyncSession = Depends(get_db),
-                   user: dict = Depends(get_current_user)):
+                   user: dict = Depends(_TDS_MAKER_OR_COMPLIANCE)):
     """Lock in the current TDS computation — required before it can be sent onward."""
     inv = await fetch_one(db, "SELECT id, stage FROM invoices WHERE id = :id", {"id": invoice_id})
     if not inv:
@@ -822,26 +866,38 @@ async def tds_save(invoice_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/{invoice_id}/tds/send-to-approval")
 async def tds_send_to_approval(invoice_id: str, db: AsyncSession = Depends(get_db),
-                               user: dict = Depends(get_current_user)):
-    """TDS Engine -> Approval Workflow handoff. Stops at stage='approval' /
-    tds_status='pending_approval' — the approval chain itself is a separate page,
-    not built here."""
-    inv = await fetch_one(db, "SELECT id, stage, tds_status FROM invoices WHERE id = :id", {"id": invoice_id})
+                               user: dict = Depends(_TDS_MAKER_OR_COMPLIANCE)):
+    """TDS Engine -> Approval Workflow handoff. Moves the invoice to stage='approval'
+    and creates its approval chain via the existing approval_engine (the same
+    routing engine the Approval Workflow page already reads from) — the approval
+    matrix/UI itself is untouched here."""
+    inv = await fetch_one(db, """
+        SELECT i.*, v.is_msme FROM invoices i JOIN vendors v ON v.id = i.vendor_id WHERE i.id = :id
+    """, {"id": invoice_id})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if inv["stage"] != "tds":
         raise HTTPException(409, f"Invoice is at stage '{inv['stage']}', not 'tds'")
     if inv["tds_status"] != "tds_ready":
         raise HTTPException(409, "Save TDS before sending to Approval Workflow")
+
+    result = await approval_engine.route(db, "invoice", invoice_id, float(inv["total_amount"]),
+                                         inv["department_id"], inv["category_id"], bool(inv["is_msme"]), user)
+    if not result["auto_approved"] and result["stages"][:1] == ["maker"]:
+        # The maker's sign-off already happened by sending it here from TDS Engine —
+        # don't make them approve their own submission a second time.
+        await approval_engine.auto_complete_maker_stage(db, "invoice", invoice_id, user)
+    next_stage = "liability" if result["auto_approved"] else "approval"
+    next_tds_status = "approved" if result["auto_approved"] else "pending_approval"
     await execute(db, """
-        UPDATE invoices SET stage = 'approval', tds_status = 'pending_approval', updated_at = now() WHERE id = :id
-    """, {"id": invoice_id})
+        UPDATE invoices SET stage = :s, tds_status = :ts, updated_at = now() WHERE id = :id
+    """, {"s": next_stage, "ts": next_tds_status, "id": invoice_id})
     await execute(db, """
         INSERT INTO invoice_stage_history (invoice_id, from_stage, to_stage, actor_id, note)
-        VALUES (:id, 'tds', 'approval', :u, 'Sent to Approval Workflow from TDS Engine')
-    """, {"id": invoice_id, "u": user["sub"]})
+        VALUES (:id, 'tds', :s, :u, 'Sent to Approval Workflow from TDS Engine')
+    """, {"id": invoice_id, "s": next_stage, "u": user["sub"]})
     await log_action(db, user["sub"], user["name"], "Sent invoice to Approval Workflow", "invoice", invoice_id, "")
-    return {"id": invoice_id, "stage": "approval", "tds_status": "pending_approval"}
+    return {"id": invoice_id, "stage": next_stage, "tds_status": next_tds_status}
 
 
 @router.get("/tds/queue")

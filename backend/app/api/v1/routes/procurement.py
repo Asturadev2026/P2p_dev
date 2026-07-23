@@ -8,11 +8,13 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
-from app.core.security import get_current_user, require_roles
+from app.core.security import get_current_user, require_roles, deny_roles
 from app.services import integration_service, email_service
 from app.utils.audit import log_action
 
-router = APIRouter(prefix="/procurement", tags=["procurement"])
+# Requesters raise PRs only — no read or write access to RFQ/PO/GRN (view or action).
+router = APIRouter(prefix="/procurement", tags=["procurement"],
+                   dependencies=[Depends(deny_roles("requester", message="Requesters have no access to RFQ/PO/GRN"))])
 
 # Procurement (RFQ/PO/GRN) is worked only by the procurement role in this demo (+ admin bypass).
 PROCUREMENT_ROLE = ("procurement",)
@@ -653,7 +655,7 @@ async def mark_awaiting_delivery(po_id: str, db: AsyncSession = Depends(get_db),
 
 @router.post("/pos/{po_id:path}/esign")
 async def esign_po(po_id: str, db: AsyncSession = Depends(get_db),
-                   user: dict = Depends(get_current_user)):
+                   user: dict = Depends(require_roles(*PROCUREMENT_ROLE))):
     po = await fetch_one(db, "SELECT * FROM purchase_orders WHERE id = :id", {"id": po_id})
     if not po:
         raise HTTPException(404, "PO not found")

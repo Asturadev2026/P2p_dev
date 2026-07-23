@@ -9,9 +9,12 @@ from app.utils.audit import log_action
 
 router = APIRouter(prefix="/requisitions", tags=["requisitions"])
 
-# Roles that can act as PR approver in this demo (Compliance/Checker/FC/CFO).
+# Only Compliance approves a PR in this demo flow. The requisition-specific approval_rules
+# bands (checker/cfo at higher amounts) are config-only and not wired to a live routing path
+# (no approval_engine.route call exists for entity_type='requisition'), so checker/fc/cfo do
+# not get PR approve/send-back/decline access here.
 # Procurement only works on already-approved PRs (RFQ/PO/GRN); it does not approve them.
-APPROVER_ROLES = ("checker", "fc", "cfo", "compliance")
+APPROVER_ROLES = ("compliance",)
 
 
 class ReqLine(BaseModel):
@@ -47,8 +50,15 @@ async def _resolve_pending_approvals(db: AsyncSession, req_id: str, decision: st
 @router.get("")
 async def list_requisitions(status: str | None = None, category_id: str | None = None,
                             db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
+    own_only = user["role"] == "requester"
+    compliance_queue = user["role"] == "compliance"
+    procurement_queue = user["role"] == "procurement"
     where = """WHERE (CAST(:status AS TEXT) IS NULL OR r.status = :status)
-               AND (CAST(:category_id AS TEXT) IS NULL OR r.category_id = :category_id)"""
+               AND (CAST(:category_id AS TEXT) IS NULL OR r.category_id = :category_id)
+               AND (CAST(:own AS BOOLEAN) IS NOT TRUE OR r.requester_id = :uid)
+               AND (CAST(:queue AS BOOLEAN) IS NOT TRUE OR r.status = 'pending_approval')
+               AND (CAST(:proc_queue AS BOOLEAN) IS NOT TRUE
+                    OR r.status IN ('approved', 'rfq_issued', 'quotation_comparison', 'po_created', 'closed'))"""
     return await fetch_all(db, f"""
         SELECT r.*, d.name AS department_name, c.name AS category_name,
                b.name AS branch_name, u.full_name AS requester_name
@@ -58,7 +68,8 @@ async def list_requisitions(status: str | None = None, category_id: str | None =
         JOIN branches b ON b.id = r.branch_id
         JOIN users u ON u.id = r.requester_id
         {where} ORDER BY r.created_at DESC
-    """, {"status": status, "category_id": category_id})
+    """, {"status": status, "category_id": category_id, "own": own_only, "uid": user["sub"],
+          "queue": compliance_queue, "proc_queue": procurement_queue})
 
 
 @router.get("/{req_id:path}/detail")
@@ -76,6 +87,8 @@ async def get_requisition(req_id: str, db: AsyncSession = Depends(get_db),
     """, {"id": req_id})
     if not req:
         raise HTTPException(404, "Requisition not found")
+    if user["role"] == "requester" and req["requester_id"] != user["sub"]:
+        raise HTTPException(403, "You can only view your own requisitions")
     lines = await fetch_all(db, "SELECT * FROM requisition_lines WHERE requisition_id = :id ORDER BY id", {"id": req_id})
     approvals = await fetch_all(db, """
         SELECT a.*, u.full_name AS assigned_name, au.full_name AS acted_name

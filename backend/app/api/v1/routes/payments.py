@@ -3,16 +3,27 @@ advances & imprest settlement."""
 import csv
 import io
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
-from app.core.security import get_current_user
+from app.core.security import get_current_user, deny_roles, require_exact_roles
 from app.services import integration_service, approval_engine
 from app.utils.audit import log_action
 
-router = APIRouter(prefix="/payments", tags=["payments"])
+# Requesters raise PRs only — no access to JVs, payment batches, or advances/imprest.
+router = APIRouter(prefix="/payments", tags=["payments"],
+                   dependencies=[Depends(deny_roles("requester", message="Requesters have no access to payments"))])
+
+# Financial Controller is the sole posting owner for Liability & JV — no admin bypass.
+_JV_PUSH_ONLY = require_exact_roles("fc", message="Only Financial Controller can push JV to ERP.")
+
+# Payment Batch: only Treasury ever sees vendor bank account/IFSC or the payout file —
+# FC/CFO/Auditor may still view batch status summaries, no one else can. No admin bypass.
+_PAYOUT_BANK_ONLY = require_exact_roles("treasury", message="Only Treasury can access payout bank details.")
+_BATCH_VIEW_ROLES = require_exact_roles("treasury", "fc", "cfo", "auditor",
+                                        message="You do not have permission to view Payment Batch.")
 
 
 # ---------- Journal vouchers ----------
@@ -30,7 +41,7 @@ async def list_jvs(db: AsyncSession = Depends(get_db), user: dict = Depends(get_
 
 @router.post("/jvs/{jv_id:path}/push")
 async def push_jv(jv_id: str, db: AsyncSession = Depends(get_db),
-                  user: dict = Depends(get_current_user)):
+                  user: dict = Depends(_JV_PUSH_ONLY)):
     jv = await fetch_one(db, "SELECT * FROM journal_vouchers WHERE id = :id", {"id": jv_id})
     if not jv:
         raise HTTPException(404, "JV not found")
@@ -41,6 +52,14 @@ async def push_jv(jv_id: str, db: AsyncSession = Depends(get_db),
     await execute(db, """
         UPDATE journal_vouchers SET status = 'pushed', erp_doc_no = :doc, pushed_at = now() WHERE id = :id
     """, {"doc": res.get("erp_doc_no"), "id": jv_id})
+    await execute(db, """
+        UPDATE invoices SET stage = 'payments', liability_status = 'liability_booked', updated_at = now()
+        WHERE id = :id
+    """, {"id": jv["invoice_id"]})
+    await execute(db, """
+        INSERT INTO invoice_stage_history (invoice_id, from_stage, to_stage, actor_id, note)
+        VALUES (:id, 'liability', 'payments', :u, :n)
+    """, {"id": jv["invoice_id"], "u": user["sub"], "n": f"JV {jv_id} pushed to ERP · doc {res.get('erp_doc_no')}"})
     await log_action(db, user["sub"], user["name"], "Pushed JV to ERP", "journal_voucher", jv_id,
                      f"₹{float(jv['amount']):,.0f} · ERP doc {res.get('erp_doc_no')}")
     return {"id": jv_id, "erp_doc_no": res.get("erp_doc_no")}
@@ -49,7 +68,7 @@ async def push_jv(jv_id: str, db: AsyncSession = Depends(get_db),
 # ---------- Payment batches ----------
 
 @router.get("/batches")
-async def list_batches(db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
+async def list_batches(db: AsyncSession = Depends(get_db), user: dict = Depends(_BATCH_VIEW_ROLES)):
     batches = await fetch_all(db, """
         SELECT b.*, u.full_name AS created_by_name,
                (SELECT COUNT(*) FROM payment_items pi WHERE pi.batch_id = b.id) AS item_count
@@ -61,7 +80,7 @@ async def list_batches(db: AsyncSession = Depends(get_db), user: dict = Depends(
 
 @router.get("/batches/{batch_id:path}/items")
 async def batch_items(batch_id: str, db: AsyncSession = Depends(get_db),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(_PAYOUT_BANK_ONLY)):
     return await fetch_all(db, """
         SELECT pi.*, v.name AS vendor_name, v.bank_name, v.bank_account, v.bank_ifsc
         FROM payment_items pi JOIN vendors v ON v.id = pi.vendor_id
@@ -77,17 +96,20 @@ class BatchCreate(BaseModel):
 @router.post("/batches")
 async def build_batch(body: BatchCreate, db: AsyncSession = Depends(get_db),
                       user: dict = Depends(get_current_user)):
+    if user["role"] != "treasury":
+        raise HTTPException(403, "Only Treasury Desk can build a payment batch")
     seq = await fetch_one(db, "SELECT COUNT(*) + 1 AS n FROM payment_batches WHERE id LIKE :p",
                           {"p": f"BATCH/{date.today():%Y/%m}/%"})
     batch_id = f"BATCH/{date.today():%Y/%m}/{seq['n']:02d}A"
     total = 0.0
+    added = 0
     await execute(db, """
         INSERT INTO payment_batches (id, status, channel, created_by) VALUES (:id, 'building', :ch, :u)
     """, {"id": batch_id, "ch": body.channel, "u": user["sub"]})
     for inv_id in body.invoice_ids:
         inv = await fetch_one(db, """
             SELECT i.*, v.is_msme FROM invoices i JOIN vendors v ON v.id = i.vendor_id
-            WHERE i.id = :id AND i.stage = 'payments'
+            WHERE i.id = :id AND i.stage = 'payments' AND i.payment_status = 'payment_ready'
         """, {"id": inv_id})
         if not inv:
             continue
@@ -103,17 +125,21 @@ async def build_batch(body: BatchCreate, db: AsyncSession = Depends(get_db),
         """, {"b": batch_id, "i": inv_id, "v": inv["vendor_id"], "amt": inv["net_payable"],
               "m": mode, "msme": inv["is_msme"]})
         total += float(inv["net_payable"])
+        added += 1
+    if not added:
+        await execute(db, "DELETE FROM payment_batches WHERE id = :id", {"id": batch_id})
+        raise HTTPException(400, "No eligible invoices to build a batch (already batched or not payment-ready)")
     await execute(db, "UPDATE payment_batches SET total_amount = :t WHERE id = :id",
                   {"t": total, "id": batch_id})
     await approval_engine.route(db, "payment_batch", batch_id, total, actor=user)
     await log_action(db, user["sub"], user["name"], "Built payment batch", "payment_batch", batch_id,
-                     f"{len(body.invoice_ids)} invoices · ₹{total:,.0f} · {body.channel}")
+                     f"{added} invoices · ₹{total:,.0f} · {body.channel}")
     return {"id": batch_id, "total_amount": total}
 
 
 @router.get("/batches/{batch_id:path}/file")
 async def payout_file(batch_id: str, db: AsyncSession = Depends(get_db),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(_PAYOUT_BANK_ONLY)):
     """Bank-ready bulk payout CSV."""
     items = await fetch_all(db, """
         SELECT pi.*, v.name AS vendor_name, v.bank_account, v.bank_ifsc
@@ -123,11 +149,11 @@ async def payout_file(batch_id: str, db: AsyncSession = Depends(get_db),
         raise HTTPException(404, "Batch empty or not found")
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["beneficiary_name", "account_no", "ifsc", "amount", "mode", "narration"])
+    w.writerow(["batch_no", "invoice_no", "vendor_name", "account_no", "ifsc", "amount", "channel", "remarks"])
     for it in items:
-        w.writerow([it["vendor_name"], it["bank_account"], it["bank_ifsc"],
+        w.writerow([batch_id, it["invoice_id"], it["vendor_name"], it["bank_account"], it["bank_ifsc"],
                     f"{float(it['net_amount']):.2f}", it["mode"],
-                    f"Intelezen Microfin · {it['invoice_id']}"])
+                    it["remarks"] or f"Intelezen Microfin · {it['invoice_id']}"])
     fname = f"intelezen_payout_{date.today():%Y%m%d}_{batch_id.split('/')[-1]}.csv"
     await execute(db, """
         UPDATE payment_batches SET file_name = :f,
@@ -144,25 +170,50 @@ async def payout_file(batch_id: str, db: AsyncSession = Depends(get_db),
 @router.post("/batches/{batch_id:path}/release")
 async def release_batch(batch_id: str, db: AsyncSession = Depends(get_db),
                         user: dict = Depends(get_current_user)):
+    if user["role"] != "treasury":
+        raise HTTPException(403, "Only Treasury Desk can release a payment batch")
     batch = await fetch_one(db, "SELECT * FROM payment_batches WHERE id = :id", {"id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
+    if batch["status"] not in ("building", "file_generated"):
+        raise HTTPException(409, f"Batch is '{batch['status']}', not ready to release")
     chain = await approval_engine.chain_status(db, "payment_batch", batch_id)
     if chain == "in_progress":
         raise HTTPException(409, "Batch approval chain still pending")
     if chain == "rejected":
         raise HTTPException(409, "Batch was rejected")
-    await execute(db, "UPDATE payment_batches SET status = 'released', released_at = now() WHERE id = :id",
-                  {"id": batch_id})
+    fname = batch["file_name"] or f"intelezen_payout_{date.today():%Y%m%d}_{batch_id.split('/')[-1]}.csv"
+    await execute(db, """
+        UPDATE payment_batches SET status = 'released', released_at = now(), file_name = :f WHERE id = :id
+    """, {"f": fname, "id": batch_id})
+    await execute(db, """
+        UPDATE invoices SET payment_status = 'payment_released', updated_at = now()
+        WHERE id IN (SELECT invoice_id FROM payment_items WHERE batch_id = :id)
+    """, {"id": batch_id})
     await log_action(db, user["sub"], user["name"], "Released payment batch", "payment_batch", batch_id,
                      f"₹{float(batch['total_amount']):,.0f} handed to bank portal")
-    return {"id": batch_id, "status": "released"}
+    return {"id": batch_id, "status": "released", "file_name": fname}
+
+
+class CaptureUtrBody(BaseModel):
+    utr: str
+    payment_date: date
+    remarks: str | None = None
 
 
 @router.post("/batches/{batch_id:path}/capture-utr")
-async def capture_utrs(batch_id: str, db: AsyncSession = Depends(get_db),
+async def capture_utrs(batch_id: str, body: CaptureUtrBody, db: AsyncSession = Depends(get_db),
                        user: dict = Depends(get_current_user)):
-    """Pull the (simulated) bank UTR feed, mark items paid, advance invoices, send remittance."""
+    """Manual UTR/reference capture for a released batch — marks items paid, advances invoices, sends remittance."""
+    if user["role"] != "treasury":
+        raise HTTPException(403, "Only Treasury Desk can capture UTR")
+    if not body.utr.strip():
+        raise HTTPException(400, "UTR/reference number is required")
+    batch = await fetch_one(db, "SELECT * FROM payment_batches WHERE id = :id", {"id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    if batch["status"] != "released":
+        raise HTTPException(409, f"Batch is '{batch['status']}', not released yet")
     items = await fetch_all(db, """
         SELECT pi.*, v.name AS vendor_name FROM payment_items pi
         JOIN vendors v ON v.id = pi.vendor_id
@@ -170,24 +221,20 @@ async def capture_utrs(batch_id: str, db: AsyncSession = Depends(get_db),
     """, {"id": batch_id})
     if not items:
         raise HTTPException(404, "No queued items in batch")
-    utrs = await integration_service.capture_utr(
-        db, batch_id, [{"invoice_id": i["invoice_id"], "mode": i["mode"]} for i in items])
-    utr_map = {u["invoice_id"]: u for u in utrs}
+    note = f"UTR {body.utr} · remittance advice sent" + (f" · {body.remarks}" if body.remarks else "")
     for it in items:
-        u = utr_map.get(it["invoice_id"])
-        if not u:
-            continue
         await execute(db, """
-            UPDATE payment_items SET utr = :utr, utr_captured_at = now(), status = 'paid',
-                   remittance_sent = TRUE
+            UPDATE payment_items SET utr = :utr, utr_captured_at = :dt, remarks = :r,
+                   status = 'paid', remittance_sent = TRUE
             WHERE id = :id
-        """, {"utr": u["utr"], "id": it["id"]})
-        await execute(db, "UPDATE invoices SET stage = 'paid', updated_at = now() WHERE id = :id",
-                      {"id": it["invoice_id"]})
+        """, {"utr": body.utr, "dt": body.payment_date, "r": body.remarks, "id": it["id"]})
+        await execute(db, """
+            UPDATE invoices SET stage = 'paid', payment_status = 'paid', updated_at = now() WHERE id = :id
+        """, {"id": it["invoice_id"]})
         await execute(db, """
             INSERT INTO invoice_stage_history (invoice_id, from_stage, to_stage, actor_id, note)
             VALUES (:id, 'payments', 'paid', :u, :n)
-        """, {"id": it["invoice_id"], "u": user["sub"], "n": f"UTR {u['utr']} · remittance advice sent"})
+        """, {"id": it["invoice_id"], "u": user["sub"], "n": note})
         await execute(db, """
             UPDATE advances a SET balance = GREATEST(a.balance - s.amount, 0),
                 status = CASE WHEN a.balance - s.amount <= 0 THEN 'settled' ELSE 'partially_settled' END
@@ -195,9 +242,9 @@ async def capture_utrs(batch_id: str, db: AsyncSession = Depends(get_db),
             WHERE s.advance_id = a.id AND s.invoice_id = :id AND a.status NOT IN ('settled')
         """, {"id": it["invoice_id"]})
     await execute(db, "UPDATE payment_batches SET status = 'reconciled' WHERE id = :id", {"id": batch_id})
-    await log_action(db, user["sub"], user["name"], "Captured UTRs · sent remittance advices",
-                     "payment_batch", batch_id, f"{len(utrs)} UTRs reconciled")
-    return {"id": batch_id, "utrs": utrs}
+    await log_action(db, user["sub"], user["name"], "Captured UTR · sent remittance advices",
+                     "payment_batch", batch_id, f"{note} · {len(items)} invoice(s) reconciled")
+    return {"id": batch_id, "utr": body.utr, "count": len(items)}
 
 
 @router.get("/items/{item_id}/remittance")
@@ -273,30 +320,79 @@ async def create_advance(body: AdvanceCreate, db: AsyncSession = Depends(get_db)
     return {"id": adv_id, "status": "pending_approval"}
 
 
+@router.post("/advances/{adv_id:path}/disburse")
+async def disburse_advance(adv_id: str, db: AsyncSession = Depends(get_db),
+                           user: dict = Depends(get_current_user)):
+    """Pay out an approved advance/imprest — Treasury Desk only."""
+    if user["role"] != "treasury":
+        raise HTTPException(403, "Only Treasury Desk can disburse an advance")
+    adv = await fetch_one(db, "SELECT * FROM advances WHERE id = :id", {"id": adv_id})
+    if not adv:
+        raise HTTPException(404, "Advance not found")
+    if adv["status"] != "approved":
+        raise HTTPException(409, f"Advance is '{adv['status']}', not approved for disbursement")
+    await execute(db, """
+        UPDATE advances SET status = 'open', disbursed_at = now() WHERE id = :id
+    """, {"id": adv_id})
+    await log_action(db, user["sub"], user["name"], "Disbursed advance", "advance", adv_id,
+                     f"₹{float(adv['amount']):,.0f} paid out")
+    return {"id": adv_id, "status": "open"}
+
+
+@router.get("/advances/{adv_id:path}/settlements")
+async def advance_settlements(adv_id: str, db: AsyncSession = Depends(get_db),
+                              user: dict = Depends(get_current_user)):
+    return await fetch_all(db, """
+        SELECT s.*, i.vendor_invoice_no FROM advance_settlements s
+        LEFT JOIN invoices i ON i.id = s.invoice_id
+        WHERE s.advance_id = :id ORDER BY s.settled_at
+    """, {"id": adv_id})
+
+
 class SettleBody(BaseModel):
-    invoice_id: str
+    invoice_id: str | None = None
     amount: float
     note: str | None = None
+
+
+async def _settle(db: AsyncSession, adv_id: str, amount: float, invoice_id: str | None,
+                  note: str | None, bill_file: str | None, user: dict) -> dict:
+    adv = await fetch_one(db, "SELECT * FROM advances WHERE id = :id", {"id": adv_id})
+    if not adv:
+        raise HTTPException(404, "Advance not found")
+    if adv["status"] not in ("open", "partially_settled"):
+        raise HTTPException(409, f"Advance is '{adv['status']}', not open for settlement")
+    if amount > float(adv["balance"]):
+        raise HTTPException(400, f"Settlement exceeds balance ₹{float(adv['balance']):,.0f}")
+    await execute(db, """
+        INSERT INTO advance_settlements (advance_id, invoice_id, amount, note, bill_file)
+        VALUES (:a, :i, :amt, :n, :f)
+    """, {"a": adv_id, "i": invoice_id, "amt": amount, "n": note, "f": bill_file})
+    new_balance = float(adv["balance"]) - amount
+    new_status = "settled" if new_balance <= 0 else "partially_settled"
+    await execute(db, """
+        UPDATE advances SET balance = :b, status = :st WHERE id = :id
+    """, {"b": new_balance, "st": new_status, "id": adv_id})
+    await log_action(db, user["sub"], user["name"], "Settled advance against bill", "advance", adv_id,
+                     f"₹{amount:,.0f}" + (f" vs {invoice_id}" if invoice_id else " (bill/refund)")
+                     + f" · balance ₹{new_balance:,.0f}")
+    return {"id": adv_id, "balance": new_balance}
 
 
 @router.post("/advances/{adv_id:path}/settle")
 async def settle_advance(adv_id: str, body: SettleBody, db: AsyncSession = Depends(get_db),
                          user: dict = Depends(get_current_user)):
-    adv = await fetch_one(db, "SELECT * FROM advances WHERE id = :id", {"id": adv_id})
-    if not adv:
-        raise HTTPException(404, "Advance not found")
-    if body.amount > float(adv["balance"]):
-        raise HTTPException(400, f"Settlement exceeds balance ₹{float(adv['balance']):,.0f}")
-    await execute(db, """
-        INSERT INTO advance_settlements (advance_id, invoice_id, amount, note)
-        VALUES (:a, :i, :amt, :n)
-    """, {"a": adv_id, "i": body.invoice_id, "amt": body.amount, "n": body.note})
-    new_balance = float(adv["balance"]) - body.amount
-    await execute(db, """
-        UPDATE advances SET balance = :b,
-            status = CASE WHEN :b <= 0 THEN 'settled' ELSE 'partially_settled' END
-        WHERE id = :id
-    """, {"b": new_balance, "id": adv_id})
-    await log_action(db, user["sub"], user["name"], "Settled advance against bill", "advance", adv_id,
-                     f"₹{body.amount:,.0f} adjusted vs {body.invoice_id} · balance ₹{new_balance:,.0f}")
-    return {"id": adv_id, "balance": new_balance}
+    """Vendor advance: adjust against a future invoice. Imprest: record a refund /
+    unsupported-by-file bill note (invoice_id omitted)."""
+    return await _settle(db, adv_id, body.amount, body.invoice_id, body.note, None, user)
+
+
+@router.post("/advances/{adv_id:path}/settle-bill")
+async def settle_advance_with_bill(adv_id: str, file: UploadFile = File(...), amount: float = Form(...),
+                                   note: str | None = Form(None), db: AsyncSession = Depends(get_db),
+                                   user: dict = Depends(get_current_user)):
+    """Imprest settlement with an uploaded bill/receipt."""
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(413, "File exceeds the 10 MB upload limit")
+    return await _settle(db, adv_id, amount, None, note, file.filename, user)

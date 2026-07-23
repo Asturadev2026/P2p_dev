@@ -1,9 +1,10 @@
 """Invoice discounting — desk, pools, TReDS, EBITDA comparison, early-pay requests."""
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, fetch_all, fetch_one, execute
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_roles
 from app.services import discounting_service, ai_agents
 from app.utils.audit import log_action
 
@@ -15,6 +16,11 @@ async def pools(db: AsyncSession = Depends(get_db), user: dict = Depends(get_cur
     overview = await discounting_service.pool_overview(db)
     cc = await fetch_all(db, "SELECT * FROM cc_facilities ORDER BY id")
     return {"pools": overview, "cc_facilities": cc}
+
+
+@router.get("/eligible-invoices")
+async def eligible_invoices(db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
+    return await discounting_service.eligible_invoices(db)
 
 
 @router.get("/deals")
@@ -76,12 +82,30 @@ class DealCreate(BaseModel):
 
 @router.post("/deals")
 async def create_deal(body: DealCreate, db: AsyncSession = Depends(get_db),
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(require_roles("treasury"))):
     result = await discounting_service.create_deal(db, body.invoice_id, body.pool_id,
                                                    body.vendor_rate_pct, body.days_saved,
                                                    user, body.cc_facility_id)
     if "error" in result:
-        raise HTTPException(404, result["error"])
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
+
+
+@router.post("/deals/{deal_id}/activate")
+async def activate_deal(deal_id: str, db: AsyncSession = Depends(get_db),
+                        user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.activate_deal(db, deal_id, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
+
+
+@router.post("/deals/{deal_id}/settle")
+async def settle_deal(deal_id: str, db: AsyncSession = Depends(get_db),
+                      user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.settle_deal(db, deal_id, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
     return result
 
 
@@ -101,7 +125,7 @@ async def early_pay_requests(db: AsyncSession = Depends(get_db), user: dict = De
 
 @router.post("/early-pay/{epr_id}/recommend")
 async def recommend(epr_id: str, db: AsyncSession = Depends(get_db),
-                    user: dict = Depends(get_current_user)):
+                    user: dict = Depends(require_roles("treasury"))):
     """Re-run the AI pool recommendation for a pending request (human-in-the-loop)."""
     epr = await fetch_one(db, """
         SELECT e.*, v.is_msme FROM early_pay_requests e
@@ -130,7 +154,7 @@ class ActionBody(BaseModel):
 
 @router.post("/early-pay/{epr_id}/accept")
 async def accept_early_pay(epr_id: str, body: ActionBody, db: AsyncSession = Depends(get_db),
-                           user: dict = Depends(get_current_user)):
+                           user: dict = Depends(require_roles("treasury"))):
     epr = await fetch_one(db, "SELECT * FROM early_pay_requests WHERE id = :id", {"id": epr_id})
     if not epr or epr["status"] != "pending":
         raise HTTPException(409, "Request not found or already actioned")
@@ -138,6 +162,8 @@ async def accept_early_pay(epr_id: str, body: ActionBody, db: AsyncSession = Dep
     deal = await discounting_service.create_deal(db, epr["invoice_id"], pool_id,
                                                  float(epr["requested_rate_pct"]),
                                                  epr["days_available"], user)
+    if "error" in deal:
+        raise HTTPException(409, deal["error"])
     await execute(db, """
         UPDATE early_pay_requests SET status = 'accepted', actioned_by = :u, actioned_at = now()
         WHERE id = :id
@@ -149,13 +175,18 @@ async def accept_early_pay(epr_id: str, body: ActionBody, db: AsyncSession = Dep
 
 @router.post("/early-pay/{epr_id}/decline")
 async def decline_early_pay(epr_id: str, body: ActionBody, db: AsyncSession = Depends(get_db),
-                            user: dict = Depends(get_current_user)):
+                            user: dict = Depends(require_roles("treasury"))):
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(400, "Decline reason is required")
+    epr = await fetch_one(db, "SELECT id, status FROM early_pay_requests WHERE id = :id", {"id": epr_id})
+    if not epr or epr["status"] != "pending":
+        raise HTTPException(409, "Request not found or already actioned")
     await execute(db, """
         UPDATE early_pay_requests SET status = 'declined', actioned_by = :u, actioned_at = now()
         WHERE id = :id AND status = 'pending'
     """, {"u": user["sub"], "id": epr_id})
     await log_action(db, user["sub"], user["name"], "Declined early-pay request", "early_pay", epr_id,
-                     body.reason or "")
+                     body.reason.strip())
     return {"id": epr_id, "status": "declined"}
 
 
@@ -173,6 +204,62 @@ async def treds(db: AsyncSession = Depends(get_db), user: dict = Depends(get_cur
         ORDER BY f.listed_at DESC
     """)
     return {"platforms": platforms, "factoring_units": units}
+
+
+@router.get("/treds/eligible-invoices")
+async def treds_eligible_invoices(db: AsyncSession = Depends(get_db), user: dict = Depends(get_current_user)):
+    return await discounting_service.eligible_treds_invoices(db)
+
+
+class TredsListBody(BaseModel):
+    invoice_id: str
+    platform_id: str
+    settlement_days: int | None = None
+    remarks: str | None = None
+
+
+@router.post("/treds")
+async def list_on_treds(body: TredsListBody, db: AsyncSession = Depends(get_db),
+                        user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.list_on_treds(db, body.invoice_id, body.platform_id,
+                                                     body.settlement_days, body.remarks, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
+
+
+@router.post("/treds/{fu_id}/start-bidding")
+async def start_bidding(fu_id: str, db: AsyncSession = Depends(get_db),
+                        user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.start_bidding(db, fu_id, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
+
+
+@router.post("/treds/{fu_id}/accept-best-bid")
+async def accept_best_bid(fu_id: str, db: AsyncSession = Depends(get_db),
+                          user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.accept_best_bid(db, fu_id, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
+
+
+class TredsSettleBody(BaseModel):
+    settlement_date: date | None = None
+    settlement_ref: str | None = None
+    remarks: str | None = None
+
+
+@router.post("/treds/{fu_id}/settle")
+async def settle_factoring_unit(fu_id: str, body: TredsSettleBody, db: AsyncSession = Depends(get_db),
+                                user: dict = Depends(require_roles("treasury"))):
+    result = await discounting_service.settle_factoring_unit(db, fu_id, body.settlement_date,
+                                                              body.settlement_ref, body.remarks, user)
+    if "error" in result:
+        raise HTTPException(404 if "not found" in result["error"] else 409, result["error"])
+    return result
 
 
 @router.get("/treds/{fu_id}/bids")

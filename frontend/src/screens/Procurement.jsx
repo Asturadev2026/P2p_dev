@@ -9,7 +9,7 @@ import { PROCUREMENT_CATEGORIES } from "../constants/procurementCategories";
 import { RFQ_TERMS_MASTER } from "../constants/rfqTerms";
 
 /* ============ Shared helpers ============ */
-const APPROVER_ROLES = ["checker", "fc", "cfo", "compliance", "admin"];
+const APPROVER_ROLES = ["compliance", "admin"];
 const isApprover = (role) => APPROVER_ROLES.includes(role);
 const isProcurement = (role) => role === "procurement" || role === "admin";
 
@@ -37,6 +37,17 @@ function Timeline({ stages, current }) {
 }
 
 const PR_STAGES = ["draft", "pending_approval", "approved", "rfq_issued", "quotation_comparison", "po_created", "closed"];
+const PR_STATUS_LABELS = {
+  draft: "Draft",
+  pending_approval: "Pending Compliance Review",
+  sent_back: "Sent Back",
+  approved: "Approved / Ready for Procurement",
+  rfq_issued: "RFQ Issued",
+  po_created: "PO Created",
+  closed: "Closed",
+  declined: "Declined",
+};
+const prStatusLabel = (status) => PR_STATUS_LABELS[status] || status;
 const RFQ_STAGES = ["draft", "sent", "quotations_received", "finalized"];
 const PO_STAGES = ["draft", "active", "awaiting_delivery", "goods_received"];
 const GRN_STAGES = ["draft", "submitted", "fully_received"];
@@ -255,6 +266,9 @@ export function Requisitions() {
     } catch (e) { toast(e.message, true); }
   };
   const decide = async (action) => {
+    if (action !== "approve" && !comments.trim()) {
+      return toast(`A remark is required to ${action.replace("-", " ")} a PR`, true);
+    }
     try {
       await api.post(`/requisitions/${detail.id}/${action}`, { comments });
       toast(`PR ${action.replace("-", " ")}d`); setComments("");
@@ -288,7 +302,7 @@ export function Requisitions() {
             { key: "branch_name", label: "Branch" },
             { key: "requester_name", label: "Requester" },
             { key: "total_amount", label: "Amount", num: true, render: (r) => inr(r.total_amount) },
-            { key: "status", label: "Status", render: (r) => <Chip value={r.status} /> },
+            { key: "status", label: "Status", render: (r) => <Chip value={r.status} label={prStatusLabel(r.status)} /> },
             { key: "next", label: "Next action", render: (r) => {
               if (r.status === "draft" && (r.requester_id === user.id || user.role === "admin")) {
                 return <button className="btn btn-pri btn-sm" onClick={(e) => { e.stopPropagation(); submit(r.id); }}>
@@ -314,7 +328,7 @@ export function Requisitions() {
           <Timeline stages={PR_STAGES} current={detail.status} />
           <DetailGrid items={[["Department", detail.department_name], ["Category", detail.category_name],
             ["Branch", detail.branch_name], ["Cost centre", detail.cost_center],
-            ["Amount", inrFull(detail.total_amount)], ["Status", detail.status],
+            ["Amount", inrFull(detail.total_amount)], ["Status", prStatusLabel(detail.status)],
             ["Requester", detail.requester_name], ["Justification", detail.justification]]} />
           <h4 style={{ margin: "14px 0 8px" }}>Lines</h4>
           <DataTable columns={[
